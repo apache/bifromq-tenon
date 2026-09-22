@@ -96,7 +96,7 @@ fn empty_runner_stays_alive_until_sigterm_and_removes_runtime_state() -> io::Res
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
+    assert_eq!(runner_diagnostics(&output.stderr)?, "");
     assert!(!runtime_root.exists());
     Ok(())
 }
@@ -203,11 +203,7 @@ fn ready_document_runs_plugins_restarts_after_pipeline_crash_and_stops_cleanly()
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.stdout.is_empty());
-    assert!(
-        output.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(runner_diagnostics(&output.stderr)?, "");
     assert!(!runtime_root.exists());
     Ok(())
 }
@@ -463,7 +459,7 @@ fn pipeline_shutdown_timeout_is_recorded_without_failing_planned_runner_shutdown
     );
     assert!(output.stdout.is_empty());
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        runner_diagnostics(&output.stderr)?,
         "runner.pipeline_shutdown_timed_out: Pipeline shutdown exceeded its deadline: forced-shutdown\n"
     );
     wait_for_processes_to_exit(iter::once(pipeline).chain(plugins))?;
@@ -493,7 +489,7 @@ fn pipeline_shutdown_deadlines_run_in_parallel_and_reap_both_process_trees() -> 
 
     assert!(output.status.success());
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        runner_diagnostics(&output.stderr)?,
         "runner.pipeline_shutdown_timed_out: Pipeline shutdown exceeded its deadline: deadline-a\n\
 runner.pipeline_shutdown_timed_out: Pipeline shutdown exceeded its deadline: deadline-b\n"
     );
@@ -733,6 +729,20 @@ fn runner_cli_test_guard() -> MutexGuard<'static, ()> {
 
 fn runner_command(config_path: &Path) -> Command {
     runner_command_with_executable(Path::new(env!("CARGO_BIN_EXE_tenon")), config_path)
+}
+
+fn runner_diagnostics(stderr: &[u8]) -> io::Result<&str> {
+    let diagnostics = std::str::from_utf8(stderr).map_err(io::Error::other)?;
+    // Unlimited Documents remain usable without Linux cgroup delegation.
+    // Allow its single startup notice while preserving every other diagnostic.
+    if cfg!(target_os = "linux")
+        && let Some((startup, remaining)) = diagnostics.split_once('\n')
+        && startup.starts_with("runner.resource_limits_unavailable: ")
+    {
+        Ok(remaining)
+    } else {
+        Ok(diagnostics)
+    }
 }
 
 fn runner_command_with_executable(executable: &Path, config_path: &Path) -> Command {

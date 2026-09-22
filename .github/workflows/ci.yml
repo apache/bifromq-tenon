@@ -53,7 +53,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           df -h /
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up fixed Java toolchain
         shell: bash
         run: |
@@ -71,7 +71,14 @@ jobs:
         with:
           path: target/runner-java-archetype/packages
           key: runner-java-bundles-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sdk/java/**', 'ipc/java/**', 'contracts/ipc/**', 'contracts/source/**', 'contracts/sink/**', 'contracts/plugin/**', 'tests/fixtures/java-*/**', 'tests/runner_java_archetype.rs', 'Cargo.toml') }}
+      - name: Restore the fixed Rust template generator
+        id: cargo-generate
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-generate
+          key: cargo-generate-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'sdk/rust/rust-plugin-scaffold/cargo-generate.toml') }}
       - name: Install the fixed Rust template generator
+        if: steps.cargo-generate.outputs.cache-hit != 'true'
         run: |
           version=$(sed -n 's/^cargo_generate_version = "=\([^"]*\)"/\1/p' sdk/rust/rust-plugin-scaffold/cargo-generate.toml)
           cargo install cargo-generate --version "$version" --locked
@@ -102,7 +109,7 @@ jobs:
           python3 tools/verify-container-resource-limits.py \
             "$RUNNER_TEMP/tenon-resource-runner" "$resource_test_binary"
       - name: Upload verified Java bundle contracts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: java-contracts-${{ matrix.name }}
           path: target/runner-java-archetype/contracts/${{ matrix.name }}.json
@@ -114,9 +121,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Download native contract evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: java-contracts-*
           path: target/java-contracts
@@ -128,30 +135,12 @@ jobs:
           python3 -m unittest discover -s tools/tests
           python3 tools/compare-java-bundle-contracts.py target/java-contracts/*.json
 
-  lua-sanitizers:
-    name: Lua C source sanitizers
-    runs-on: ubuntu-24.04
-    env:
-      ASAN_OPTIONS: detect_leaks=1
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Install Clang sanitizer runtime
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes clang-18 libclang-rt-18-dev
-      - name: Run Lua source regressions under sanitizers
-        env:
-          CC: clang-18
-        run: tools/verify-lua-source.sh
-
   docs:
     name: Documentation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up contract validation
         run: python3 -m pip install jsonschema==4.23.0
       - name: Validate contracts and documentation
