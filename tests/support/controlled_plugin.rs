@@ -250,10 +250,10 @@ impl ChildContext {
             &self.working_directory.join("configs.received"),
             &config_line,
         )?;
-        std::fs::write(
-            self.working_directory.join("process.pid"),
-            std::process::id().to_string(),
-        )?;
+        // Cleanup may read the PID as soon as the file exists.
+        let pending_pid = self.working_directory.join("process.pid.tmp");
+        std::fs::write(&pending_pid, std::process::id().to_string())?;
+        std::fs::rename(pending_pid, self.working_directory.join("process.pid"))?;
         append(
             &self.working_directory.join("processes.received"),
             &format!("{}\n", std::process::id()),
