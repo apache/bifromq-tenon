@@ -39,7 +39,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use tenon_plugin_sdk::{
-    Completion, Error, FlowChannel, PayloadSender, SourceAndSinkProgram, TenonSource,
+    Completion, Error, FlowChannel, Ingress, PayloadSender, SourceAndSinkProgram, TenonSource,
     TenonSourceAndSink, Value,
 };
 
@@ -56,7 +56,7 @@ impl Connection {
 struct Bridge {
     connection: Arc<Connection>,
     config: Value,
-    sender: PayloadSender<Vec<u8>>,
+    sender: Option<PayloadSender<Vec<u8>>>,
     source: Mutex<Option<Producer>>,
     starting: Option<Completion>,
 }
@@ -68,17 +68,21 @@ impl TenonSourceAndSink<String> for Bridge {
             .expect("event log failed");
         match self.config["mode"].as_str() {
             Some("failed-shared-start") => {
-                self.starting = Some(self.sender.send(0, &vec![]).expect("Source send failed"));
+                self.starting = Some(
+                    self.sender
+                        .as_ref()
+                        .expect("Source is bound")
+                        .send(0, &vec![])
+                        .expect("Source send failed"),
+                );
                 panic!("Shared start failed")
             }
             Some("panic-shared-start") => panic_in_callback(),
-            _ if self.config["sourceEnabled"].as_bool().unwrap_or(true) => self
-                .source
-                .get_mut()
-                .expect("source mutex is not poisoned")
-                .as_mut()
-                .expect("Source is created during factory initialization")
-                .start(),
+            _ if self.config["sourceEnabled"].as_bool().unwrap_or(true) => {
+                if let Some(source) = self.source.get_mut().expect("source mutex").as_mut() {
+                    source.start();
+                }
+            }
             _ => {}
         }
     }
@@ -87,12 +91,9 @@ impl TenonSourceAndSink<String> for Bridge {
         if !self.config["sourceEnabled"].as_bool().unwrap_or(true) {
             return;
         }
-        self.source
-            .lock()
-            .expect("source mutex")
-            .as_mut()
-            .expect("Source is created during factory initialization")
-            .quiesce();
+        if let Some(source) = self.source.lock().expect("source mutex").as_mut() {
+            source.quiesce();
+        }
     }
 
     fn write(
@@ -237,7 +238,15 @@ impl TenonSource for Producer {
 }
 
 fn main() {
-    let program = SourceAndSinkProgram::run(|config: Value, parallelism, sender| {
+    let program = SourceAndSinkProgram::run(|config: Value, ingress, _channels| {
+        let (parallelism, sender) = ingress
+            .map(
+                |Ingress {
+                     parallelism,
+                     sender,
+                 }| (parallelism, Some(sender)),
+            )
+            .unwrap_or((0, None));
         println!("factory channels {parallelism}");
         if config["mode"] == "failed-factory" {
             return Err("Shared factory failed".into());
@@ -246,20 +255,21 @@ fn main() {
             config["resource"].as_str().ok_or("missing resource path")?,
         )?));
         connection.event("opened")?;
-        connection.event("create 0")?;
-        let source_connection = connection.clone();
-        let source_config = config.clone();
-        let source_sender = sender.clone();
+        let source = sender.as_ref().map(|sender| {
+            connection.event("create 0").expect("event log");
+            Producer {
+                connection: connection.clone(),
+                config: config.clone(),
+                sender: sender.clone(),
+                results: Vec::new(),
+            }
+        });
+        println!("sink channels {}", _channels.len());
         Ok(Bridge {
             connection: connection.clone(),
             config,
             sender,
-            source: Mutex::new(Some(Producer {
-                connection: source_connection,
-                config: source_config,
-                sender: source_sender,
-                results: Vec::new(),
-            })),
+            source: Mutex::new(source),
             starting: None,
         })
     });

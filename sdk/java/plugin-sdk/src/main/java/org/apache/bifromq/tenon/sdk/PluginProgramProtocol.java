@@ -149,9 +149,9 @@ final class PluginProgramProtocol {
               "Channel doorbell Region must be an absolute path");
     }
     var inputs = document.sinkInputs();
-    List<FlowChannel> sinkInputs = null;
+    List<SinkInput> sinkInputs = null;
     if (inputs != null) {
-      var converted = new ArrayList<FlowChannel>(inputs.size());
+      var converted = new ArrayList<SinkInput>(inputs.size());
       for (var input : inputs) {
         if (input == null
             || input.flowId() == null
@@ -167,7 +167,9 @@ final class PluginProgramProtocol {
               "plugin.startup.sink_channels_invalid",
               "Every Sink input must name an absolute Channel doorbell Region");
         }
-        converted.add(new FlowChannel(input.flowId(), input.channelId(), input.channelBellPath()));
+        converted.add(
+            new SinkInput(
+                new FlowChannel(input.flowId(), input.channelId()), input.channelBellPath()));
       }
       sinkInputs = List.copyOf(converted);
     }
@@ -198,7 +200,7 @@ final class PluginProgramProtocol {
    * so the Pipeline always appends the list for those Interfaces. Its absence is a startup failure
    * rather than an idle Sink.
    */
-  static List<FlowChannel> requireSinkInputs(Startup startup) throws PluginProgramStartupException {
+  static List<SinkInput> requireSinkInputs(Startup startup) throws PluginProgramStartupException {
     var inputs = startup.bells().sinkInputs();
     if (inputs == null) {
       throw new PluginProgramStartupException(
@@ -271,7 +273,7 @@ final class PluginProgramProtocol {
   }
 
   /** The Channel doorbell Regions one Instance rings, as its startup document carries them. */
-  record Bells(Path sourceChannelRegion, List<FlowChannel> sinkInputs) {}
+  record Bells(Path sourceChannelRegion, List<SinkInput> sinkInputs) {}
 
   /** Absent directions stay null; an unknown key is malformed startup rather than an extension. */
   private record SdkConfigValue(

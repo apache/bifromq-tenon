@@ -27,7 +27,7 @@ verifyGeneratedPlugin(
         packageName: "com.example.plugin.sourceandsink",
         factoryName: "com.example.plugin.sourceandsink.SourceAndSinkPluginFactory",
         servicePath: "src/main/resources/META-INF/services/org.apache.bifromq.tenon.sdk.TenonSourceAndSinkFactory",
-        schemaRequired: ["message", "queueIndex", "outputFile"],
+        schemaRequired: [],
         presentPaths: [
                 "src/main/java/com/example/plugin/sourceandsink/Main.java",
                 "src/main/java/com/example/plugin/sourceandsink/SourceAndSinkPluginFactory.java",

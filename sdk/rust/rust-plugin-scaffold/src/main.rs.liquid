@@ -28,7 +28,7 @@ mod output;
 
 fn main() {
     let program =
-        SourceProgram::run(|config, _parallelism, sender| Ok(source::Source::new(&config, sender)));
+        SourceProgram::run(|config, _parallelism, sender| source::Source::new(&config, sender));
     program.await_shutdown();
 }
 {% elsif interface == "sink" %}use tenon_plugin_sdk::SinkProgram;
@@ -40,8 +40,8 @@ fn main() {
 {% else %}use tenon_plugin_sdk::SourceAndSinkProgram;
 
 fn main() {
-    let program = SourceAndSinkProgram::run(|config, _parallelism, sender| {
-        file_program::FileProgram::new(config, sender)
+    let program = SourceAndSinkProgram::run(|config, ingress, channels| {
+        file_program::FileProgram::new(config, ingress, channels)
     });
     program.await_shutdown();
 }

@@ -70,20 +70,27 @@ pub(super) fn build_instance_launch<'a>(
 ) -> ControlledPluginLaunch<'a> {
     let instance = &target.document().plugin_instances()[instance_id];
     let program = target.program_for_instance(instance_id);
-    let sink_inputs = matches!(
-        program.payload_contract().interface(),
-        PluginInterface::Sink | PluginInterface::SourceAndSink
-    )
-    .then(|| {
-        sink_channels_of(target, instance_id, available_cpu_count)
-            .into_iter()
-            .map(|(flow_id, channel_id)| SinkChannel {
-                channel_bell_path: flow_channel_bell_path(pipeline_directory, flow_id.as_str()),
-                flow_id,
-                channel_id,
-            })
-            .collect()
-    });
+    let source_channel_region = target
+        .document()
+        .flows()
+        .iter()
+        .find(|(_, flow)| flow.source() == instance_id)
+        .map(|(flow_id, _)| flow_channel_bell_path(pipeline_directory, flow_id.as_str()));
+    let sink_inputs: Vec<_> = sink_channels_of(target, instance_id, available_cpu_count)
+        .into_iter()
+        .map(|(flow_id, channel_id)| SinkChannel {
+            channel_bell_path: flow_channel_bell_path(pipeline_directory, flow_id.as_str()),
+            flow_id,
+            channel_id,
+        })
+        .collect();
+    let interface = match (source_channel_region.is_some(), !sink_inputs.is_empty()) {
+        (true, true) => PluginInterface::SourceAndSink,
+        (true, false) => PluginInterface::Source,
+        (false, true) => PluginInterface::Sink,
+        (false, false) => unreachable!("a verified Instance is referenced by at least one Flow"),
+    };
+    let sink_inputs = (!sink_inputs.is_empty()).then_some(sink_inputs);
     ControlledPluginLaunch::new(
         PluginLaunch {
             program_directory: program.program_directory(),
@@ -96,18 +103,11 @@ pub(super) fn build_instance_launch<'a>(
             extra_args: instance.extra_args(),
             env: instance.env(),
             bells: PluginBells {
-                source_channel_region: target
-                    .document()
-                    .flows()
-                    .iter()
-                    .find(|(_, flow)| flow.source() == instance_id)
-                    .map(|(flow_id, _)| {
-                        flow_channel_bell_path(pipeline_directory, flow_id.as_str())
-                    }),
+                source_channel_region,
                 sink_inputs,
             },
         },
-        program.payload_contract().interface(),
+        interface,
         control,
     )
 }

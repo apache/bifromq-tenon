@@ -53,7 +53,7 @@ Pipeline states are `unready`, `starting`, `updating`, `running` and `restart-ba
 
 `documentEtag` always describes the latest persistent Document. `appliedDocumentEtag` appears when a live Pipeline has applied a configuration. Different ETags mean an update is pending or the saved Document is unready while the old configuration continues to run. Check plugin status and external service connectivity separately.
 
-An unready status includes `runtimeIssues`, such as missing Program, platform mismatch, invalid plugin configuration, missing interface, unbound interface or invalid Lua runtime binding. Details identify the affected Program, Instance or Flow. Restart backoff can include a sanitized `lastError`; when an ETag is included, it identifies the configuration that failed. Resource enforcement is reported for the applied configuration, not an unexecuted desired one.
+An unready status includes `runtimeIssues`, such as missing Program, platform mismatch, invalid plugin configuration, missing interface or invalid Lua runtime binding. Binding an instance as Source or Sink requires the Program to support that interface; leaving its other supported interface unbound is valid. Details identify the affected Program, Instance or Flow. Restart backoff can include a sanitized `lastError`; when an ETag is included, it identifies the configuration that failed. Resource enforcement is reported for the applied configuration, not an unexecuted desired one.
 
 ## Plugin metadata
 

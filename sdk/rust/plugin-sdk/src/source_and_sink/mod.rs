@@ -26,8 +26,17 @@ mod program;
 
 pub use program::SourceAndSinkProgram;
 
-use crate::{Error, FlowChannel};
+use crate::{Error, FlowChannel, PayloadSender};
 use std::future::Future;
+
+/// The transport for the Source direction bound to this Instance.
+#[derive(Debug)]
+pub struct Ingress<P> {
+    /// The positive number of ordered channels in the bound Flow.
+    pub parallelism: usize,
+    /// The concurrent sender shared by the Instance's Source producers.
+    pub sender: PayloadSender<P>,
+}
 
 /// One business owner serving both Plugin interfaces through shared resources.
 pub trait TenonSourceAndSink<P>: Send + Sync + 'static {

@@ -66,20 +66,20 @@ pub trait TenonSink<P>: Send + Sync + 'static {
 }
 
 /// The Flow and its zero-based channel that produced a Sink batch.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowChannel {
     /// The exact Flow id authored in the Tenon Document.
     pub flow_id: String,
     /// The channel index within that Flow's parallelism.
     pub channel_id: u32,
-    /// The Bell Region the Channel that wrote this input waits in.
-    ///
-    /// Releasing a batch rings the slot whose ordinal that Channel published,
-    /// so the wake reaches the exact loop that produced the batch. The Sink's
-    /// side of the handshake is its one Egress loop, which publishes the same
-    /// ordinal in the Sink's own-loop Region for every input.
-    pub channel_bell_path: PathBuf,
+}
+
+/// SDK-internal wiring for one Sink input. Plugin code only sees `FlowChannel`.
+#[derive(Clone, Debug)]
+pub(crate) struct SinkInput {
+    pub(crate) channel: FlowChannel,
+    pub(crate) channel_bell_path: PathBuf,
 }
 
 impl FlowChannel {

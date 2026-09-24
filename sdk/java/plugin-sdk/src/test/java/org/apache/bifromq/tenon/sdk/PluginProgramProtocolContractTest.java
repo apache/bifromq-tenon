@@ -63,8 +63,10 @@ final class PluginProgramProtocolContractTest {
         assertEquals(expected.size(), channels.size());
         for (int index = 0; index < channels.size(); index++) {
           var channel = channels.get(index);
-          assertEquals(expected.get(index).required("flowId").stringValue(), channel.flowId());
-          assertEquals(expected.get(index).required("channelId").intValue(), channel.channelId());
+          assertEquals(
+              expected.get(index).required("flowId").stringValue(), channel.channel().flowId());
+          assertEquals(
+              expected.get(index).required("channelId").intValue(), channel.channel().channelId());
           assertEquals(
               Path.of(expected.get(index).required("channelBellPath").stringValue()),
               channel.channelBellPath());
@@ -72,7 +74,7 @@ final class PluginProgramProtocolContractTest {
               parsed
                   .workingDirectory()
                   .resolve(vector.required("relativeQueuePaths").get(index).stringValue()),
-              EgressQueueLayout.queue(parsed.workingDirectory(), channel));
+              EgressQueueLayout.queue(parsed.workingDirectory(), channel.channel()));
         }
       }
       assertEquals(-1, stream.read());

@@ -67,8 +67,11 @@ final class PluginProgramRuntime {
   /** Reads Sink identities before the lifetime watcher takes ownership of stdin. */
   static SourceAndSinkStartup startSourceAndSink(String[] arguments) throws IOException {
     var startup = readStartup(arguments);
-    var channels = PluginProgramProtocol.requireSinkInputs(startup);
-    var channelBellPath = PluginProgramProtocol.requireChannelBellPath(startup);
+    var channels = startup.bells().sinkInputs();
+    var channelBellPath = startup.bells().sourceChannelRegion();
+    if (channelBellPath == null && (channels == null || channels.isEmpty())) {
+      throw new IOException("plugin.startup.no_bound_interface");
+    }
     return new SourceAndSinkStartup(attach(startup), channels, channelBellPath);
   }
 
@@ -100,7 +103,7 @@ final class PluginProgramRuntime {
     return config;
   }
 
-  /** Reports that every interface declared by this Program has completed local startup. */
+  /** Reports that every direction bound for this Instance has completed local startup. */
   synchronized void publishReady() throws IOException {
     requirePhase(Phase.ATTACHED);
     control.send(PluginToPipeline.newBuilder().setReady(Ready.getDefaultInstance()).build());
@@ -180,10 +183,10 @@ final class PluginProgramRuntime {
 
   record SourceStartup(PluginProgramRuntime runtime, Path channelBellPath) {}
 
-  record SinkStartup(PluginProgramRuntime runtime, List<FlowChannel> channels) {}
+  record SinkStartup(PluginProgramRuntime runtime, List<SinkInput> channels) {}
 
   record SourceAndSinkStartup(
-      PluginProgramRuntime runtime, List<FlowChannel> channels, Path channelBellPath) {}
+      PluginProgramRuntime runtime, List<SinkInput> channels, Path channelBellPath) {}
 
   private enum Phase {
     ATTACHED,

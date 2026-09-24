@@ -21,6 +21,21 @@ use super::*;
 
 const VECTORS: &str = include_str!("../../../../contracts/process_protocol_test_vectors.json");
 
+fn sink_input_values(inputs: &[SinkInput]) -> Value {
+    Value::Array(
+        inputs
+            .iter()
+            .map(|input| {
+                serde_json::json!({
+                    "flowId": input.channel.flow_id,
+                    "channelId": input.channel.channel_id,
+                    "channelBellPath": input.channel_bell_path,
+                })
+            })
+            .collect(),
+    )
+}
+
 fn startups(outcome: &str) -> Result<Vec<Value>, Error> {
     let vectors: Value = serde_json::from_str(VECTORS)?;
     Ok(vectors["startup"][outcome]
@@ -80,7 +95,12 @@ fn assert_startup_document(startup: &Startup, vector: &Value) -> Result<(), Erro
         vector["name"]
     );
     assert_eq!(
-        &serde_json::to_value(&startup.bells.sink_inputs)?,
+        &startup
+            .bells
+            .sink_inputs
+            .as_ref()
+            .map(|inputs| sink_input_values(inputs))
+            .unwrap_or(Value::Null),
         &document["sinkInputs"].clone(),
         "{}",
         vector["name"]
@@ -138,7 +158,13 @@ fn program_arguments_and_extra_args_before_the_reserved_option_do_not_break_star
         STANDARD.encode(&startup.launch_id),
         "AAECAwQFBgcICQoLDA0ODw=="
     );
-    assert_eq!(startup.bells.sink_inputs, Some(Vec::new()));
+    assert!(
+        startup
+            .bells
+            .sink_inputs
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+    );
     assert_eq!(startup.config, serde_json::json!({}));
     Ok(())
 }
@@ -223,7 +249,7 @@ fn sink_inputs_come_from_the_shared_vectors() -> Result<(), Error> {
             } else {
                 let startup = result?;
                 assert_eq!(
-                    serde_json::to_value(require_sink_inputs(&startup)?)?,
+                    sink_input_values(&require_sink_inputs(&startup)?),
                     vector["sdkConfig"]["sinkInputs"]
                 );
                 assert_startup_document(&startup, &vector)?;

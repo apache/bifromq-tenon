@@ -82,7 +82,6 @@ fn saturated_channels(working: &Path) -> Vec<FlowChannel> {
         .map(|index| {
             let flow_id = format!("flow-{index}");
             FlowChannel {
-                channel_bell_path: peer::flow_bell_path(working, &flow_id),
                 flow_id,
                 channel_id: 0,
             }
@@ -93,7 +92,6 @@ fn saturated_channels(working: &Path) -> Vec<FlowChannel> {
 /// The single Channel one reconnect test drives.
 fn resumed_channel(working: &Path) -> Vec<FlowChannel> {
     vec![FlowChannel {
-        channel_bell_path: peer::flow_bell_path(working, "flow-0"),
         flow_id: "flow-0".into(),
         channel_id: 0,
     }]

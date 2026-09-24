@@ -49,7 +49,7 @@ final class SinkProgramOwner<P extends MessageLite> {
 
   /** Opens the existing Egress Queues for one standalone Sink business object. */
   static <P extends MessageLite> SinkProgramOwner<P> open(
-      TenonSink<P> sink, Path workingDirectory, List<FlowChannel> channels, Parser<P> payloadParser)
+      TenonSink<P> sink, Path workingDirectory, List<SinkInput> channels, Parser<P> payloadParser)
       throws IOException, IpcQueueFormatException {
     Objects.requireNonNull(sink, "sink");
     return open(sink::write, workingDirectory, channels, payloadParser);
@@ -59,7 +59,7 @@ final class SinkProgramOwner<P extends MessageLite> {
   static <P extends MessageLite> SinkProgramOwner<P> open(
       TenonSourceAndSink<P> owner,
       Path workingDirectory,
-      List<FlowChannel> channels,
+      List<SinkInput> channels,
       Parser<P> payloadParser)
       throws IOException, IpcQueueFormatException {
     Objects.requireNonNull(owner, "owner");
@@ -69,7 +69,7 @@ final class SinkProgramOwner<P extends MessageLite> {
   private static <P extends MessageLite> SinkProgramOwner<P> open(
       BiFunction<FlowChannel, List<P>, CompletionStage<Void>> writer,
       Path workingDirectory,
-      List<FlowChannel> channels,
+      List<SinkInput> channels,
       Parser<P> payloadParser)
       throws IOException {
     var readers = new ArrayList<IpcQueue.Reader>(channels.size());
@@ -83,8 +83,9 @@ final class SinkProgramOwner<P extends MessageLite> {
       var bell = loops.loopBell(0);
       var inputs = new ArrayList<SinkCoordinator.Input<P>>(channels.size());
       var failure = new CompletableFuture<Void>();
-      for (var channel : channels) {
-        var peerRegion = openRegion(channel.channelBellPath(), regions);
+      for (var input : channels) {
+        var channel = input.channel();
+        var peerRegion = openRegion(input.channelBellPath(), regions);
         var reader =
             IpcQueue.openReader(
                 EgressQueueLayout.queue(workingDirectory, channel), bell, peerRegion);

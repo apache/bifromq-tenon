@@ -21,47 +21,71 @@
 
 use crate::{output::Output, payload::SinkRecordPayload};
 {% if interface == "source-and-sink" %}use crate::{payload::SourceRecordPayload, source::Source};
+use std::collections::BTreeSet;
 use std::sync::Mutex;
-{% endif %}
-use std::{future::ready, path::Path};
+{% endif %}use std::{future::ready, path::Path};
 {% if interface == "sink" %}use tenon_plugin_sdk::TenonSink;
 {% endif %}use tenon_plugin_sdk::{Error, FlowChannel, Value};
-{% if interface == "source-and-sink" %}use tenon_plugin_sdk::{PayloadSender, TenonSource, TenonSourceAndSink};
+{% if interface == "source-and-sink" %}use tenon_plugin_sdk::{Ingress, TenonSource, TenonSourceAndSink};
 {% endif %}
 pub(super) struct FileProgram {
-    output: Output,
-{% if interface == "source-and-sink" %}    source: Mutex<Source>,
+{% if interface == "source-and-sink" %}    output: Option<Output>,
+    source: Mutex<Option<Source>>,
+{% else %}    output: Output,
 {% endif %}}
 
 impl FileProgram {
 {% if interface == "source-and-sink" %}    pub(super) fn new(
         config: Value,
-        sender: PayloadSender<SourceRecordPayload>,
+        ingress: Option<Ingress<SourceRecordPayload>>,
+        channels: BTreeSet<FlowChannel>,
     ) -> Result<Self, Error> {
+        let output = if channels.is_empty() {
+            None
+        } else {
+            let path = config["outputFile"].as_str().ok_or_else(|| {
+                std::io::Error::other("outputFile is required when Sink is bound")
+            })?;
+            Some(Output::open(Path::new(path))?)
+        };
+        let source = ingress
+            .map(|Ingress { sender, .. }| Source::new(&config, sender))
+            .transpose()?;
+        Ok(Self {
+            output,
+            source: Mutex::new(source),
+        })
 {% else %}    pub(super) fn new(config: Value) -> Result<Self, Error> {
-{% endif %}        let path = config["outputFile"]
+        let path = config["outputFile"]
             .as_str()
             .expect("config.schema.json requires an absolute output path");
         Ok(Self {
             output: Output::open(Path::new(path))?,
-{% if interface == "source-and-sink" %}            source: Mutex::new(Source::new(&config, sender)),
-{% endif %}        })
-    }
+        })
+{% endif %}    }
 }
 
 {% if interface == "source-and-sink" %}impl TenonSourceAndSink<SinkRecordPayload> for FileProgram {
     fn start(&mut self) {
-        self.source
+        if let Some(source) = self
+            .source
             .get_mut()
             .expect("Source lock must not panic")
-            .start();
+            .as_mut()
+        {
+            source.start();
+        }
     }
 
     fn quiesce(&self) {
-        self.source
+        if let Some(source) = self
+            .source
             .lock()
             .expect("Source lock must not panic")
-            .quiesce();
+            .as_mut()
+        {
+            source.quiesce();
+        }
     }
 {% else %}impl TenonSink<SinkRecordPayload> for FileProgram {
     fn start(&mut self) {}
@@ -71,14 +95,22 @@ impl FileProgram {
         _channel: FlowChannel,
         records: Box<[SinkRecordPayload]>,
     ) -> impl Future<Output = Result<(), Error>> {
-        ready(self.output.write(&records))
-    }
+{% if interface == "source-and-sink" %}        ready(match &self.output {
+            Some(output) => output.write(&records),
+            None => Err(std::io::Error::other("Sink direction is not bound").into()),
+        })
+{% else %}        ready(self.output.write(&records))
+{% endif %}    }
 
     fn close(&mut self) {
-{% if interface == "source-and-sink" %}        self.source
+{% if interface == "source-and-sink" %}        if let Some(source) = self
+            .source
             .get_mut()
             .expect("Source lock must not panic")
-            .close();
+            .as_mut()
+        {
+            source.close();
+        }
 {% endif %}        // Every successful batch is already durable; dropping this owner closes the file.
     }
 }

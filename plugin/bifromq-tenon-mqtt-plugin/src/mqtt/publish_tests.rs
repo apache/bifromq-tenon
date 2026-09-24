@@ -70,6 +70,7 @@ impl PublishingClient {
         let owner = Arc::new(ChannelClient {
             control: control.clone(),
             writes: writes.clone(),
+            source_enabled: false,
         });
         let source = source_fixture(1, PENDING_RECORDS);
         let sender = source.sender::<SourceRecordPayload>();
@@ -78,7 +79,7 @@ impl PublishingClient {
             Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
                 tokio::select! {
                     _ = cancelled => Ok(()),
-                    result = Connection { channel: 0, eventloop, sender, writes, dispatcher, control, source_acks, configured_clean_start: true }.run() => result,
+                    result = Connection { channel: 0, eventloop, sender: Some(sender), writes, dispatcher, control, source_acks, configured_clean_start: true }.run() => result,
                 }
             })
         });

@@ -133,6 +133,7 @@ impl PluginProgramPayloadContract {
     }
 
     /// Derives the Program interface from the standard roots validated at parse time.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn interface(&self) -> PluginInterface {
         match (

@@ -23,6 +23,8 @@ import com.google.protobuf.StringValue;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -42,8 +44,9 @@ public final class SourceAndSinkProbeFactory
 
   @Override
   public TenonSourceAndSink<StringValue> create(
-      JsonNode config, int parallelism, PayloadSender<StringValue> sender) {
-    if (parallelism != 1) {
+      JsonNode config, Optional<Ingress<StringValue>> ingress, Set<FlowChannel> egressChannels) {
+    var sender = ingress.map(Ingress::sender).orElse(null);
+    if (ingress.isPresent() && ingress.get().parallelism() != 1) {
       throw new IllegalArgumentException("Source-and-Sink probe requires exactly one Queue");
     }
     if (!DEVICE_OPEN.compareAndSet(false, true)) {
@@ -80,17 +83,19 @@ public final class SourceAndSinkProbeFactory
       this.events = events;
       this.sender = sender;
       this.failurePoint = failurePoint;
-      ProbeEvents.append(events, "source-create");
+      if (sender != null) ProbeEvents.append(events, "source-create");
       this.source =
-          new SourceProbeFactory.SourceProbe(
-              events,
-              sender,
-              1,
-              switch (failurePoint) {
-                case SOURCE_START -> SourceProbeFactory.FailurePoint.START;
-                case SOURCE_START_AND_CLOSE -> SourceProbeFactory.FailurePoint.START_AND_CLOSE;
-                default -> SourceProbeFactory.FailurePoint.NONE;
-              });
+          sender == null
+              ? null
+              : new SourceProbeFactory.SourceProbe(
+                  events,
+                  sender,
+                  1,
+                  switch (failurePoint) {
+                    case SOURCE_START -> SourceProbeFactory.FailurePoint.START;
+                    case SOURCE_START_AND_CLOSE -> SourceProbeFactory.FailurePoint.START_AND_CLOSE;
+                    default -> SourceProbeFactory.FailurePoint.NONE;
+                  });
     }
 
     @Override
@@ -111,18 +116,18 @@ public final class SourceAndSinkProbeFactory
                     });
         throw new IllegalStateException("Expected shared start failure");
       }
-      source.start();
+      if (source != null) source.start();
     }
 
     @Override
     public void quiesce() {
-      source.quiesce();
+      if (source != null) source.quiesce();
     }
 
     @Override
     public void close() {
       try {
-        source.close();
+        if (source != null) source.close();
         if (startingResult != null) {
           try {
             startingResult.join();

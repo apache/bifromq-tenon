@@ -33,11 +33,10 @@ use tokio::time::timeout;
 ///
 /// The Flow Region path travels with the input because the Core runtime owns
 /// where that Region lives; a Side only learns it from its startup record.
-fn channels(working: &Path) -> Vec<FlowChannel> {
+fn channels(_working: &Path) -> Vec<FlowChannel> {
     vec![FlowChannel {
         flow_id: "input".into(),
         channel_id: 0,
-        channel_bell_path: peer::flow_bell_path(working, "input"),
     }]
 }
 
@@ -139,23 +138,84 @@ async fn one_shared_owner_keeps_sink_and_completion_alive_through_source_quiesce
 }
 
 #[tokio::test]
-async fn combined_program_can_run_sink_only_and_still_closes_created_source() -> Result<(), Error> {
+async fn combined_program_with_only_sink_bound_writes_and_closes_without_source()
+-> Result<(), Error> {
     let mut peer =
-        Peer::start_source_and_sink(serde_json::json!({"sourceEnabled": false}), channels).await?;
+        Peer::start_source_and_sink(serde_json::json!({"boundSource": false}), channels).await?;
     peer.ready().await?;
-    peer.quiesce().await?;
-    peer.quiesced().await?;
+    assert!(!peer.working.join("source").exists());
+    write(&peer, "sink-only")?;
+    released(&peer).await?;
     let events = peer.finish().await?;
-    assert!(!events.iter().any(|line| line == "source-start"));
-    assert!(!events.iter().any(|line| line == "source-quiesce"));
-    assert_eq!(
-        events.iter().filter(|line| *line == "source-close").count(),
-        1
+    assert!(events.iter().any(|line| line == "factory channels 0"));
+    assert!(
+        !events
+            .iter()
+            .any(|line| line.starts_with("source-") || line == "create 0")
     );
     assert_eq!(
         events.iter().filter(|line| *line == "shared-close").count(),
         1
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn combined_program_with_only_source_bound_submits_and_closes_without_sink()
+-> Result<(), Error> {
+    let mut peer = Peer::start_source_and_sink(serde_json::json!({}), |_| Vec::new()).await?;
+    peer.ready().await?;
+    assert!(!peer.working.join("sink").exists());
+    let mut reader = peer.reader()?;
+    let record = timeout(DEADLINE, async {
+        loop {
+            if let tenon_ipc::queue::ReadOutcome::Record(record) = reader.try_read()? {
+                let record = source::IngressRecord::decode(record.payload())?;
+                reader.release(1)?;
+                return Ok::<_, Error>(record);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    assert!(matches!(
+        peer.writer()?.try_write(
+            &source::IngressCompletion {
+                record_id: record.record_id,
+                status: 1
+            }
+            .encode_to_vec()
+        )?,
+        WriteOutcome::Committed(_)
+    ));
+    peer.event("result 0 Ok(Ok)").await?;
+    peer.quiesce().await?;
+    peer.quiesced().await?;
+    let events = peer.finish().await?;
+    assert!(events.iter().any(|line| line == "sink channels 0"));
+    assert_eq!(
+        events.iter().filter(|line| *line == "shared-close").count(),
+        1
+    );
+    assert!(!events.iter().any(|line| line.starts_with("write ")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn sink_only_combined_write_failure_and_unexpected_quiesce_terminate() -> Result<(), Error> {
+    for fail_write in [true, false] {
+        let mut peer =
+            Peer::start_source_and_sink(serde_json::json!({"boundSource": false}), channels)
+                .await?;
+        peer.ready().await?;
+        if fail_write {
+            write(&peer, "fail")?;
+        } else {
+            peer.quiesce().await?;
+        }
+        let events = peer.exit(ExpectedExit::Failure).await?;
+        assert!(!events.iter().any(|line| line == "shared-close"));
+    }
     Ok(())
 }
 

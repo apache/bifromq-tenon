@@ -19,10 +19,7 @@
 
 package org.apache.bifromq.tenon.sdk;
 
-/**
- * Identifies the Flow and its zero-based Channel that produced one Sink batch.
- *
- * @param flowId the exact Flow id authored in the Tenon Document
- * @param channelId the Channel index within that Flow's parallelism
- */
-public record FlowChannel(String flowId, int channelId) {}
+import java.nio.file.Path;
+
+/** SDK-internal wiring for one Sink input. */
+record SinkInput(FlowChannel channel, Path channelBellPath) {}

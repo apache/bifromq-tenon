@@ -87,7 +87,7 @@ impl RunningClient {
             Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
                 tokio::select! {
                     _ = cancelled => Ok(()),
-                    result = Connection { channel: 0, eventloop, sender, writes, dispatcher, control: event_control, source_acks, configured_clean_start: false }.run() => result,
+                    result = Connection { channel: 0, eventloop, sender: Some(sender), writes, dispatcher, control: event_control, source_acks, configured_clean_start: false }.run() => result,
                 }
             })
         });

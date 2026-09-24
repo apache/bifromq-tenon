@@ -152,6 +152,7 @@ fn confirmed_publish(qos: u32, response: Reply) -> Result<(), String> {
     let owner = ChannelClient {
         writes: writes.clone(),
         control: control.clone(),
+        source_enabled: false,
     };
     let source = source_fixture(1, PENDING_RECORDS);
     let sender = source.sender::<SourceRecordPayload>();
@@ -160,7 +161,7 @@ fn confirmed_publish(qos: u32, response: Reply) -> Result<(), String> {
         Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
         tokio::select! {
             _ = cancelled => Ok(()),
-            result = tokio::time::timeout(Duration::from_secs(5), Connection { channel: 0, eventloop, sender, writes, dispatcher, control, source_acks, configured_clean_start: true }.run()) => result.expect("event loop deadline"),
+            result = tokio::time::timeout(Duration::from_secs(5), Connection { channel: 0, eventloop, sender: Some(sender), writes, dispatcher, control, source_acks, configured_clean_start: true }.run()) => result.expect("event loop deadline"),
         }
     })
     });

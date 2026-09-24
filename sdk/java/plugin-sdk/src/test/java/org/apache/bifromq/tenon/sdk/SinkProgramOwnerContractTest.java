@@ -81,8 +81,12 @@ final class SinkProgramOwnerContractTest {
         root.resolve("sink")
             .resolve(org.apache.bifromq.tenon.sdk.ipc.BellRegion.LOOPS_BELL_FILE_NAME),
         1);
-    SideFixtures.createRegion(channel.channelBellPath(), 1);
-    return SinkProgramOwner.open(sink, root, List.of(channel), StringValue.parser());
+    SideFixtures.createRegion(SideFixtures.flowBellPath(root, channel.flowId()), 1);
+    return SinkProgramOwner.open(
+        sink,
+        root,
+        List.of(new SinkInput(channel, SideFixtures.flowBellPath(root, channel.flowId()))),
+        StringValue.parser());
   }
 
   private static class RecordingSink implements TenonSink<StringValue> {

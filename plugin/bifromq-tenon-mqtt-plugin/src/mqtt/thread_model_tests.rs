@@ -78,8 +78,11 @@ fn every_channel_owns_its_client_when_clients_are_spread_over_threads() {
             "eventLoopThreads": 2,
             "source": {"subscriptions": [{"filter": "input", "qos": 1}]},
         }),
-        2,
-        source.sender::<SourceRecordPayload>(),
+        Some(Ingress {
+            parallelism: 2,
+            sender: source.sender::<SourceRecordPayload>(),
+        }),
+        BTreeSet::new(),
     )
     .expect("plugin");
     assert_eq!(plugin.connections.len(), 2, "one Connection per Channel");
@@ -148,4 +151,40 @@ fn every_channel_owns_its_client_when_clients_are_spread_over_threads() {
         started.elapsed() < Duration::from_secs(5),
         "close must join every Connection within its window"
     );
+}
+
+#[test]
+fn sink_channels_beyond_source_parallelism_do_not_become_source_channels() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("peer listener");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let port = listener.local_addr().expect("peer address").port();
+    let source = source_fixture(1, PENDING_RECORDS);
+    let mut plugin = MqttPlugin::new(
+        serde_json::json!({
+            "endpoint": format!("mqtt://127.0.0.1:{port}"),
+            "clientIdPrefix": "mixed-",
+            "source": {"subscriptions": [{"filter": "input", "qos": 1}]},
+        }),
+        Some(Ingress {
+            parallelism: 1,
+            sender: source.sender::<SourceRecordPayload>(),
+        }),
+        [FlowChannel {
+            flow_id: "sink-flow".into(),
+            channel_id: 2,
+        }]
+        .into_iter()
+        .collect(),
+    )
+    .expect("plugin");
+    assert_eq!(plugin.inner.clients.len(), 3);
+    assert!(plugin.inner.clients[0].source_enabled);
+    assert!(
+        plugin.inner.clients[1..]
+            .iter()
+            .all(|client| !client.source_enabled)
+    );
+    plugin.close();
 }
