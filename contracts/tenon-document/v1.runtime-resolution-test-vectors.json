@@ -329,7 +329,7 @@
       }
     },
     {
-      "name": "Every declared Program interface must be bound for each Instance",
+      "name": "Dual-interface Instances can independently use only their bound direction",
       "availablePrograms": [
         {
           "programName": "com.example.dual",
@@ -343,7 +343,7 @@
         {
           "programName": "com.example.sink",
           "exactVersion": "1.0.0",
-          "interface": "sink",
+          "interface": "source-and-sink",
           "configSchema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object"
@@ -352,7 +352,7 @@
       ],
       "document": {
         "specVersion": "1",
-        "id": "interface-unbound",
+        "id": "interfaces-used-independently",
         "pluginInstances": {
           "dual": {
             "programName": "com.example.dual",
@@ -379,14 +379,10 @@
         }
       },
       "expected": {
-        "kind": "unready",
-        "issues": [
-          {
-            "code": "plugin_interface_unbound",
-            "pluginInstanceId": "dual",
-            "interface": "sink"
-          }
-        ]
+        "kind": "ready",
+        "programCount": 2,
+        "pluginInstanceCount": 2,
+        "flowCount": 1
       }
     },
     {

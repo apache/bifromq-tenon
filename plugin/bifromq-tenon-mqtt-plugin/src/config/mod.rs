@@ -29,8 +29,9 @@ pub struct Config {
     /// How many OS threads drive every MQTT client this instance owns.
     ///
     /// Clients are pinned to a thread by index, so the real thread count is
-    /// `min(eventLoopThreads, parallelism)`: parallelism is the client count's
-    /// upper bound, and a larger value never creates another thread.
+    /// The runtime uses `min(eventLoopThreads, client_count)` workers, where
+    /// `client_count` covers the bound Source channels and Sink channel IDs.
+    /// A larger value never creates another thread.
     #[serde(default = "default_event_loop_threads")]
     pub event_loop_threads: usize,
     #[serde(default)]

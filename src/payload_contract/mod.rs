@@ -133,6 +133,10 @@ impl PluginProgramPayloadContract {
     }
 
     /// Derives the Program interface from the standard roots validated at parse time.
+    #[allow(
+        dead_code,
+        reason = "The descriptor projection is used by payload-contract and revision tests."
+    )]
     #[must_use]
     pub(crate) fn interface(&self) -> PluginInterface {
         match (

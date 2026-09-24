@@ -18,6 +18,7 @@
  */
 
 use crate::json::parse_json;
+use crate::sink::SinkInput;
 use crate::{Error, FlowChannel, Value};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -57,7 +58,7 @@ pub(crate) struct Bells {
     /// The Flow Region the Source side rings, when this Interface Sources one.
     pub(crate) source_channel_region: Option<PathBuf>,
     /// Every Sink input in startup order, when this Interface consumes Flows.
-    pub(crate) sink_inputs: Option<Vec<FlowChannel>>,
+    pub(crate) sink_inputs: Option<Vec<SinkInput>>,
 }
 
 /// One Plugin process's whole startup document, as its reserved option carries
@@ -75,7 +76,15 @@ struct SdkConfigValue {
     #[serde(default)]
     source_channel_region: Option<String>,
     #[serde(default)]
-    sink_inputs: Option<Vec<FlowChannel>>,
+    sink_inputs: Option<Vec<SinkInputValue>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SinkInputValue {
+    flow_id: String,
+    channel_id: u32,
+    channel_bell_path: PathBuf,
 }
 
 pub(crate) fn read(
@@ -144,7 +153,7 @@ pub(crate) fn require_channel_bell_path(startup: &Startup) -> Result<PathBuf, Er
 /// A Sink takes each Egress Queue from a list element and picks its own-loop
 /// Bell slot itself, so the Pipeline always names the list for those
 /// Interfaces. Its absence is a startup failure rather than an idle Sink.
-pub(crate) fn require_sink_inputs(startup: &Startup) -> Result<Vec<FlowChannel>, Error> {
+pub(crate) fn require_sink_inputs(startup: &Startup) -> Result<Vec<SinkInput>, Error> {
     startup
         .bells
         .sink_inputs
@@ -188,11 +197,17 @@ fn absolute_path(value: &str, code: &'static str) -> Result<PathBuf, Error> {
     }
 }
 
-fn absolute_sink_input(input: FlowChannel) -> Result<FlowChannel, Error> {
+fn absolute_sink_input(input: SinkInputValue) -> Result<SinkInput, Error> {
     if input.channel_bell_path.is_absolute()
         && !input.channel_bell_path.as_os_str().as_bytes().contains(&0)
     {
-        Ok(input)
+        Ok(SinkInput {
+            channel: FlowChannel {
+                flow_id: input.flow_id,
+                channel_id: input.channel_id,
+            },
+            channel_bell_path: input.channel_bell_path,
+        })
     } else {
         Err(invalid("plugin.startup.sink_channels_invalid").into())
     }

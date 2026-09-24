@@ -29,10 +29,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.apache.bifromq.tenon.sdk.AckCode;
 import org.apache.bifromq.tenon.sdk.FlowChannel;
+import org.apache.bifromq.tenon.sdk.Ingress;
 import org.apache.bifromq.tenon.sdk.PayloadSender;
 import org.apache.bifromq.tenon.sdk.TenonSource;
 import org.apache.bifromq.tenon.sdk.TenonSourceAndSink;
@@ -44,37 +47,49 @@ public final class SourceAndSinkPluginFactory
     implements TenonSourceAndSinkFactory<SourceRecordPayload, SinkRecordPayload> {
   @Override
   public TenonSourceAndSink<SinkRecordPayload> create(
-      JsonNode config, int parallelism, PayloadSender<SourceRecordPayload> sender)
+      JsonNode config,
+      Optional<Ingress<SourceRecordPayload>> source,
+      Set<FlowChannel> egressChannels)
       throws IOException {
-    return new PluginOwner(PluginConfig.parse(config, parallelism), sender);
+    var parsed =
+        PluginConfig.parse(
+            config,
+            source.map(Ingress::parallelism).orElse(0),
+            source.isPresent(),
+            !egressChannels.isEmpty());
+    return new PluginOwner(
+        parsed, source.map(Ingress::sender).orElse(null), !egressChannels.isEmpty());
   }
 
   private static final class PluginOwner implements TenonSourceAndSink<SinkRecordPayload> {
     private final PluginSource source;
     private final FileChannel output;
 
-    private PluginOwner(PluginConfig config, PayloadSender<SourceRecordPayload> sender)
+    private PluginOwner(
+        PluginConfig config, PayloadSender<SourceRecordPayload> sender, boolean sinkBound)
         throws IOException {
-      this.output = openOutput(config.outputFile());
-      this.source = new PluginSource(config, sender);
+      this.output = sinkBound ? openOutput(config.outputFile()) : null;
+      this.source = sender == null ? null : new PluginSource(config, sender);
     }
 
     @Override
     public void start() {
-      source.start();
+      if (source != null) source.start();
     }
 
     @Override
     public void quiesce() {
-      source.quiesce();
+      if (source != null) source.quiesce();
     }
 
     @Override
     public void close() {
-      source.close();
+      if (source != null) source.close();
       // Close the shared connection only here, during final Shutdown.
       try {
-        output.close();
+        if (output != null) {
+          output.close();
+        }
       } catch (IOException error) {
         throw new UncheckedIOException(error);
       }
@@ -84,6 +99,9 @@ public final class SourceAndSinkPluginFactory
     public synchronized CompletionStage<Void> write(
         FlowChannel channel, List<SinkRecordPayload> records) {
       try {
+        if (output == null) {
+          throw new IllegalStateException("Sink direction is not bound");
+        }
         writeMessages(output, records);
         return CompletableFuture.completedFuture(null);
       } catch (IOException error) {
@@ -129,16 +147,20 @@ public final class SourceAndSinkPluginFactory
   }
 
   private record PluginConfig(String message, int queueIndex, Path outputFile) {
-    private static PluginConfig parse(JsonNode config, int parallelism) throws IOException {
-      var queueIndex = config.required("queueIndex").intValue();
-      if (queueIndex >= parallelism) {
+    private static PluginConfig parse(
+        JsonNode config, int parallelism, boolean sourceBound, boolean sinkBound)
+        throws IOException {
+      var queueIndex = sourceBound ? config.required("queueIndex").intValue() : 0;
+      if (sourceBound && queueIndex >= parallelism) {
         throw new IllegalArgumentException("queueIndex must be less than Flow parallelism");
       }
-      var outputFile = Path.of(config.required("outputFile").stringValue());
-      if (!outputFile.isAbsolute()) {
+      var message = sourceBound ? config.required("message").stringValue() : "";
+      var outputFile =
+          sinkBound ? Path.of(config.required("outputFile").stringValue()) : Path.of("/");
+      if (sinkBound && !outputFile.isAbsolute()) {
         throw new IOException("outputFile must be an absolute path");
       }
-      return new PluginConfig(config.required("message").stringValue(), queueIndex, outputFile);
+      return new PluginConfig(message, queueIndex, outputFile);
     }
   }
 

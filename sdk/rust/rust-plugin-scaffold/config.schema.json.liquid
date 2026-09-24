@@ -6,5 +6,5 @@
 {% if interface != "sink" %}    "message": {"type": "string", "minLength": 1, "description": "Message emitted once at startup on the first channel."}{% if interface != "source" %},{% endif %}
 {% endif %}{% if interface != "source" %}    "outputFile": {"type": "string", "pattern": "^/", "description": "Absolute path of the file receiving appended message lines."}
 {% endif %}  },
-  "required": [{% if interface != "sink" %}"message"{% if interface != "source" %}, {% endif %}{% endif %}{% if interface != "source" %}"outputFile"{% endif %}]
+  "required": [{% if interface != "source-and-sink" %}{% if interface != "sink" %}"message"{% if interface != "source" %}, {% endif %}{% endif %}{% if interface != "source" %}"outputFile"{% endif %}{% endif %}]
 }

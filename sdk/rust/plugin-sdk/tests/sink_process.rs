@@ -30,17 +30,15 @@ use tenon_plugin_sdk::repository_test_support::{plugin, sink};
 use tenon_plugin_sdk::{Error, FlowChannel};
 use tokio::time::timeout;
 
-fn channels(working: &Path) -> Vec<FlowChannel> {
+fn channels(_working: &Path) -> Vec<FlowChannel> {
     vec![
         FlowChannel {
             flow_id: "main".into(),
             channel_id: 0,
-            channel_bell_path: peer::flow_bell_path(working, "main"),
         },
         FlowChannel {
             flow_id: "other".into(),
             channel_id: 0,
-            channel_bell_path: peer::flow_bell_path(working, "other"),
         },
     ]
 }

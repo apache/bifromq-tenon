@@ -27,7 +27,7 @@
     reason = "Egress loop locks, batches and joins are SDK-owned invariants"
 )]
 
-use super::{FlowChannel, SINK_DIRECTORY_NAME};
+use super::{FlowChannel, SINK_DIRECTORY_NAME, SinkInput};
 use crate::LOOPS_BELL_FILE_NAME;
 use crate::{Error, wire};
 use futures_util::{Stream, stream::FuturesUnordered};
@@ -55,10 +55,7 @@ pub(crate) struct Queues {
 }
 
 impl Queues {
-    pub(crate) fn open(
-        working_directory: &Path,
-        channels: Vec<FlowChannel>,
-    ) -> Result<Self, Error> {
+    pub(crate) fn open(working_directory: &Path, channels: Vec<SinkInput>) -> Result<Self, Error> {
         let loops = BellRegion::open(
             &working_directory
                 .join(SINK_DIRECTORY_NAME)
@@ -67,8 +64,9 @@ impl Queues {
         let bell = loops.loop_bell(0)?;
         let queues = channels
             .into_iter()
-            .map(|channel| {
-                let peer = BellRegion::open(&channel.channel_bell_path)?;
+            .map(|input| {
+                let peer = BellRegion::open(&input.channel_bell_path)?;
+                let channel = input.channel;
                 let reader = Reader::open(
                     channel.queue_path(working_directory),
                     Arc::clone(&bell),

@@ -40,7 +40,12 @@ impl Source {
 
 impl TenonSource for Source {
     fn start(&mut self) {
-        for channel in &self.inner.clients {
+        for channel in self
+            .inner
+            .clients
+            .iter()
+            .filter(|channel| channel.source_enabled)
+        {
             channel
                 .control
                 .lock()
@@ -50,7 +55,12 @@ impl TenonSource for Source {
     }
 
     fn quiesce(&mut self) {
-        for channel in &self.inner.clients {
+        for channel in self
+            .inner
+            .clients
+            .iter()
+            .filter(|channel| channel.source_enabled)
+        {
             channel
                 .control
                 .lock()
@@ -60,7 +70,12 @@ impl TenonSource for Source {
     }
 
     fn close(&mut self) {
-        for channel in &self.inner.clients {
+        for channel in self
+            .inner
+            .clients
+            .iter()
+            .filter(|channel| channel.source_enabled)
+        {
             channel
                 .control
                 .lock()

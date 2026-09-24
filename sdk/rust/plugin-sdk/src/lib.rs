@@ -48,7 +48,7 @@ pub use sink::{FlowChannel, SinkProgram, TenonSink};
 pub use source::{
     AckCode, Completion, InvalidChannel, PayloadSender, SendError, SourceProgram, TenonSource,
 };
-pub use source_and_sink::{SourceAndSinkProgram, TenonSourceAndSink};
+pub use source_and_sink::{Ingress, SourceAndSinkProgram, TenonSourceAndSink};
 
 /// An operation failure from the SDK or a business callback.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;

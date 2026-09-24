@@ -38,11 +38,12 @@ use rumqttc::{
     PublishOptions,
 };
 use rumqttc::{Outgoing, Transport};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tenon_plugin_sdk::{
-    AckCode, Error, FlowChannel, PayloadSender, TenonSource, TenonSourceAndSink, Value,
+    AckCode, Error, FlowChannel, Ingress, PayloadSender, TenonSource, TenonSourceAndSink, Value,
 };
 use tokio::runtime::Builder;
 #[cfg(test)]
@@ -60,6 +61,7 @@ const CLOSE_WINDOW: Duration = Duration::from_secs(1);
 pub(crate) struct ChannelClient {
     pub(crate) control: Arc<Mutex<SubscriptionControl>>,
     writes: Arc<Writes>,
+    pub(crate) source_enabled: bool,
 }
 pub(crate) struct Inner {
     pub(crate) clients: Vec<ChannelClient>,
@@ -67,7 +69,7 @@ pub(crate) struct Inner {
 }
 pub struct MqttPlugin {
     inner: Arc<Inner>,
-    source: Mutex<Source>,
+    source: Option<Mutex<Source>>,
     /// The threads every Connection is pinned to. It must outlive the joins in
     /// `close`, because dropping the pool cancels the tasks still on it.
     pool: LocalPoolHandle,
@@ -99,10 +101,21 @@ where
 impl MqttPlugin {
     pub fn new(
         value: Value,
-        n: usize,
-        sender: PayloadSender<SourceRecordPayload>,
+        source: Option<Ingress<SourceRecordPayload>>,
+        egress_channels: BTreeSet<FlowChannel>,
     ) -> Result<Self, Error> {
         let config = Config::parse(&value)?;
+        let source_parallelism = source.as_ref().map(|source| source.parallelism);
+        if source_parallelism == Some(0) {
+            return Err("parallelism must be positive".into());
+        }
+        let sink_parallelism = egress_channels
+            .iter()
+            .map(|channel| channel.channel_id as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let n = source_parallelism.unwrap_or(0).max(sink_parallelism);
+        let sender = source.map(|source| source.sender);
         if n == 0 {
             return Err("parallelism must be positive".into());
         }
@@ -150,14 +163,19 @@ impl MqttPlugin {
             let (client, eventloop) = AsyncClient::builder(options).capacity(32).try_build()?;
             let (writes, dispatcher) = Writes::new(client.clone());
             let source_acks = SourceAcks::new(client.clone());
+            let source_enabled = source_parallelism.is_some_and(|parallelism| i < parallelism);
             let control = Arc::new(Mutex::new(SubscriptionControl::new(
                 client.clone(),
-                subscriptions(&config),
+                if source_enabled {
+                    subscriptions(&config)
+                } else {
+                    &[]
+                },
             )));
             let connection = Connection {
                 channel: i,
                 eventloop,
-                sender: sender.clone(),
+                sender: source_enabled.then(|| sender.as_ref().expect("Source sender").clone()),
                 writes: writes.clone(),
                 dispatcher,
                 control: control.clone(),
@@ -171,13 +189,19 @@ impl MqttPlugin {
                     panic!("MQTT event loop channel {i} failed: {error}");
                 }
             }));
-            clients.push(ChannelClient { control, writes });
+            clients.push(ChannelClient {
+                control,
+                writes,
+                source_enabled,
+            });
         }
         let inner = Arc::new(Inner { clients, config });
-        let source = Source::new(inner.clone());
+        let source = sender
+            .is_some()
+            .then(|| Mutex::new(Source::new(inner.clone())));
         Ok(Self {
             inner,
-            source: Mutex::new(source),
+            source,
             pool,
             connections,
         })
@@ -197,7 +221,7 @@ struct Connection {
     eventloop: EventLoop,
     /// The Source channel this Connection feeds. Encoding runs here, on the
     /// event loop, and the returned future stays with the record it belongs to.
-    sender: PayloadSender<SourceRecordPayload>,
+    sender: Option<PayloadSender<SourceRecordPayload>>,
     writes: Arc<Writes>,
     dispatcher: Dispatcher,
     control: Arc<Mutex<SubscriptionControl>>,
@@ -322,6 +346,7 @@ impl Connection {
                     // Encoding and local admission are decided before send()
                     // returns, so a result that is already settled here belongs
                     // to a record this Connection never admitted.
+                    let Some(sender) = &sender else { continue; };
                     let mut completion = sender
                         .send(channel, &payload)
                         .expect("MQTT client index matches its Source channel");
@@ -531,10 +556,14 @@ impl ChannelClient {
 
 impl TenonSourceAndSink<SinkRecordPayload> for MqttPlugin {
     fn start(&mut self) {
-        self.source.lock().expect("source mutex").start();
+        if let Some(source) = &mut self.source {
+            source.get_mut().expect("source mutex").start();
+        }
     }
     fn quiesce(&self) {
-        self.source.lock().expect("source mutex").quiesce();
+        if let Some(source) = &self.source {
+            source.lock().expect("source mutex").quiesce();
+        }
     }
     fn write(
         &self,
@@ -550,7 +579,13 @@ impl TenonSourceAndSink<SinkRecordPayload> for MqttPlugin {
         async move { result?.await }
     }
     fn close(&mut self) {
-        self.source.lock().expect("source mutex").close();
+        for channel in &self.inner.clients {
+            channel
+                .control
+                .lock()
+                .expect("subscription control lock")
+                .close();
+        }
         let connections = std::mem::take(&mut self.connections);
         if connections.is_empty() {
             return;

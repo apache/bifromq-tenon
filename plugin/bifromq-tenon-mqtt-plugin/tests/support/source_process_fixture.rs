@@ -64,6 +64,7 @@ mod mqtt {
                 clients: vec![ChannelClient {
                     control,
                     writes: Writes::new(client).0,
+                    source_enabled: true,
                 }],
             });
             Ok(Self {

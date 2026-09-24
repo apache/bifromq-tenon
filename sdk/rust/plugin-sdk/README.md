@@ -157,14 +157,14 @@ mod source;
 use tenon_plugin_sdk::SourceAndSinkProgram;
 
 fn main() {
-    let program = SourceAndSinkProgram::run(|config, _channel_count, sender| {
-        file_program::FileProgram::new(config, sender)
+    let program = SourceAndSinkProgram::run(|config, ingress, channels| {
+        file_program::FileProgram::new(config, ingress, channels)
     });
     program.await_shutdown();
 }
 ```
 
-The shared factory and `start` each run once. Use configuration to decide whether Source production is enabled.
+The shared factory and `start` each run once. Runner activates each direction from the current Flow bindings. The factory receives `Option<Ingress<S>>` and the actual `BTreeSet<FlowChannel>` Sink inputs, so the same Program can run Source-only, Sink-only, or in both directions. An unbound direction has no queues or SDK workers. `FlowChannel` contains only the Flow id and channel id.
 
 Quiescing stops only Source production; Sink writes and Source results can still use the shared connection. Final shutdown resolves Source results, stops Sink workers, then closes the shared object once. For example, a device can stop publishing events while still receiving the final commands through the same connection.
 

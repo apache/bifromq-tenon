@@ -28,16 +28,19 @@ pub(super) struct Source {
 }
 
 impl Source {
-    pub(super) fn new(config: &Value, sender: PayloadSender<SourceRecordPayload>) -> Self {
-        Self {
+    pub(super) fn new(
+        config: &Value,
+        sender: PayloadSender<SourceRecordPayload>,
+    ) -> Result<Self, tenon_plugin_sdk::Error> {
+        let message = config["message"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("message is required when Source is bound"))?;
+        Ok(Self {
             payload: SourceRecordPayload {
-                message: config["message"]
-                    .as_str()
-                    .expect("config.schema.json requires a message string")
-                    .to_owned(),
+                message: message.to_owned(),
             },
             sender,
-        }
+        })
     }
 }
 

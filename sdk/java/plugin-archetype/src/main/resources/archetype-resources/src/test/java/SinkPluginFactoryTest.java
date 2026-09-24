@@ -42,9 +42,7 @@ final class SinkPluginFactoryTest {
     var sink = new SinkPluginFactory().create(config);
     sink.start();
 
-    sink.write(
-            new FlowChannel("example", 0, directory.resolve("channel.bells")),
-            List.of(payload("first"), payload("second")))
+    sink.write(new FlowChannel("example", 0), List.of(payload("first"), payload("second")))
         .toCompletableFuture()
         .get();
     sink.close();

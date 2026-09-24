@@ -166,7 +166,7 @@ struct ChildContext {
 
 impl ChildContext {
     fn from_environment() -> Result<Self, io::Error> {
-        let interface = match std::env::var("TENON_TEST_PLUGIN_INTERFACE").as_deref() {
+        let declared_interface = match std::env::var("TENON_TEST_PLUGIN_INTERFACE").as_deref() {
             Ok("source") => PluginInterface::Source,
             Ok("sink") => PluginInterface::Sink,
             Ok("source-and-sink") => PluginInterface::SourceAndSink,
@@ -196,36 +196,43 @@ impl ChildContext {
         let launch_id = decoded
             .try_into()
             .map_err(|_| io::Error::other("Controlled child launch id is not 16 bytes"))?;
-        // The Pipeline fills a direction exactly for an Interface that declares
-        // it, so an Interface whose direction is absent fails instead of idling.
         let channel_bell_path = match document.get("sourceChannelRegion") {
             Some(region) => Some(PathBuf::from(region.as_str().ok_or_else(|| {
                 io::Error::other("Controlled child Channel region is not a path")
             })?)),
-            None if matches!(
-                interface,
-                PluginInterface::Source | PluginInterface::SourceAndSink
-            ) =>
-            {
-                return Err(io::Error::other(
-                    "Controlled child Channel region is missing",
-                ));
-            }
             None => None,
         };
         let sink_channels = match document.get("sinkInputs") {
             Some(inputs) => serde_json::from_value(inputs.clone()).map_err(|_| {
                 io::Error::other("Controlled child Sink inputs are not a Channel list")
             })?,
-            None if matches!(
-                interface,
-                PluginInterface::Sink | PluginInterface::SourceAndSink
-            ) =>
-            {
-                return Err(io::Error::other("Controlled child Sink inputs are missing"));
-            }
             None => Vec::new(),
         };
+        let has_source = channel_bell_path.is_some();
+        let has_sink = document.get("sinkInputs").is_some();
+        let interface = match (has_source, has_sink) {
+            (true, true) => PluginInterface::SourceAndSink,
+            (true, false) => PluginInterface::Source,
+            (false, true) => PluginInterface::Sink,
+            (false, false) => {
+                return Err(io::Error::other(
+                    "Controlled child has no bound interface direction",
+                ));
+            }
+        };
+        let declared_source = matches!(
+            declared_interface,
+            PluginInterface::Source | PluginInterface::SourceAndSink
+        );
+        let declared_sink = matches!(
+            declared_interface,
+            PluginInterface::Sink | PluginInterface::SourceAndSink
+        );
+        if (has_source && !declared_source) || (has_sink && !declared_sink) {
+            return Err(io::Error::other(
+                "Controlled child received a direction outside its declared interface",
+            ));
+        }
         Ok(Self {
             interface,
             working_directory,

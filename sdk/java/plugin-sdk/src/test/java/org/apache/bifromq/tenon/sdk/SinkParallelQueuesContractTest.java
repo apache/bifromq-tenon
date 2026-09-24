@@ -150,7 +150,15 @@ final class SinkParallelQueuesContractTest {
       List<FlowChannel> channels,
       Thread.UncaughtExceptionHandler ignored)
       throws Exception {
-    return SinkProgramOwner.open(sink, directory, channels, StringValue.parser());
+    return SinkProgramOwner.open(
+        sink,
+        directory,
+        channels.stream()
+            .map(
+                channel ->
+                    new SinkInput(channel, SideFixtures.flowBellPath(directory, channel.flowId())))
+            .toList(),
+        StringValue.parser());
   }
 
   private static IpcQueue.WriteReceipt write(IpcQueue.Writer writer, String payload)

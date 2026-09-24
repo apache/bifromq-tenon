@@ -46,7 +46,7 @@ The Source sends `message` once at startup on channel 0. A continuous source sho
 {% endif %}{% if interface != "source" %}
 The Sink appends each message as a line in `outputFile`. Each batch is synchronized to the file before success is reported. A failed write can leave partial output, so replay may produce duplicates. Newlines inside messages are preserved. The file's parent directory must already exist and be writable by the plugin process.
 {% endif %}{% if interface == "source-and-sink" %}
-The combined plugin sends once and writes received messages to the output file. A Tenon flow must explicitly connect the two interfaces, either to each other or to other plugins.
+The combined plugin sends once when the Source direction is bound and writes received messages when the Sink direction is bound. The same Program may be used as Source-only, Sink-only, or in both directions; unbound directions do not create SDK queues or workers.
 {% endif %}
 Tenon validates instance configuration against `config.schema.json`. For example:
 
@@ -57,7 +57,7 @@ Tenon validates instance configuration against `config.schema.json`. For example
 {% endif %}}
 ```
 
-All shown fields are required; additional properties are rejected.{% if interface != "sink" %} `message` must be nonempty.{% endif %}{% if interface != "source" %} `outputFile` must be an absolute path.{% endif %}
+Additional properties are rejected. For a combined plugin, each field is required only when its corresponding direction is bound: `message` for Source and `outputFile` for Sink. For a single-interface plugin, its listed field is required.{% if interface != "sink" %} `message` must be nonempty.{% endif %}{% if interface != "source" %} `outputFile` must be an absolute path.{% endif %}
 
 ## Customize the plugin
 

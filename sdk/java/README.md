@@ -88,3 +88,7 @@ yourself. The bundler includes either project file when you provide it; it alway
 preserves the third-party runtime's legal files and dependency JARs. Review all
 bundled components before distributing your plugin. Tenon's own Maven artifacts
 carry their Apache LICENSE, NOTICE and incubation DISCLAIMER under META-INF.
+
+## Combined Programs
+
+A combined Program may be bound as Source only, Sink only, or both. The SDK creates only the sessions represented by the current Flow bindings. Its factory receives `Optional<Ingress<S>>` for the bound Source direction and the actual `Set<FlowChannel>` Sink inputs. `FlowChannel` contains only `flowId` and `channelId`.
