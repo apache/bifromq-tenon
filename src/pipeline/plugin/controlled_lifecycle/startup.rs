@@ -53,7 +53,7 @@ pub(in crate::pipeline) struct ControlledPluginLaunch<'a> {
 }
 
 impl<'a> ControlledPluginLaunch<'a> {
-    /// Combines process material with the declared interface and Pipeline control endpoint.
+    /// Combines process material with this launch's bound interfaces and control endpoint.
     pub(in crate::pipeline) const fn new(
         process: PluginLaunch<'a>,
         interface: PluginInterface,

@@ -81,8 +81,9 @@ final class PluginLifecycleIntegrationTest {
 
   @TempDir Path directory;
 
-  @Test
-  void sourceOnlyProgramUsesUdsQueuesAndTwoStageShutdown() throws Exception {
+  @ParameterizedTest
+  @ValueSource(strings = {"source", "source-and-sink"})
+  void sourceOnlyBindingUsesUdsQueuesAndTwoStageShutdown(String programInterface) throws Exception {
     var workingDirectory = directory.resolve("source-instance");
     var sourceDirectory = workingDirectory.resolve("source");
     var events = directory.resolve("source-events.log");
@@ -93,11 +94,12 @@ final class PluginLifecycleIntegrationTest {
     try (var server = LifecycleServer.start(directory.resolve("source-control.sock"));
         var submission = bells.readSubmission(0);
         var completion = bells.writeCompletion(0)) {
-      var process = startProbe("source", bells, server.socket(), events);
+      var process = startProbe(programInterface, bells, server.socket(), events);
       try {
         writeConfig(process, events);
         assertAttach(server.awaitMessage());
         assertTrue(server.awaitMessage().hasReady());
+        assertFalse(Files.exists(workingDirectory.resolve("sink")));
 
         var record = awaitSubmission(submission);
         assertEquals("telemetry", StringValue.parseFrom(record.getPayload()).getValue());
@@ -132,8 +134,12 @@ final class PluginLifecycleIntegrationTest {
         assertFalse(result.error().contains("READY"));
         assertFalse(
             result.error().contains("Unknown channel option 'SO_KEEPALIVE'"), result.error());
+        var sourceEvents =
+            "source-start\nsource-quiesce\nsource-admission-closed\nsource-ack-OK\nsource-close\n";
         assertEquals(
-            "source-start\nsource-quiesce\nsource-admission-closed\nsource-ack-OK\nsource-close\n",
+            programInterface.equals("source")
+                ? sourceEvents
+                : "owner-create\nsource-create\nowner-start\n" + sourceEvents + "owner-close\n",
             Files.readString(events).replace(System.lineSeparator(), "\n"));
       } finally {
         stop(process);
@@ -141,8 +147,10 @@ final class PluginLifecycleIntegrationTest {
     }
   }
 
-  @Test
-  void sinkOnlyProgramUsesTheSameUdsLifecycleAndReleasesEgress() throws Exception {
+  @ParameterizedTest
+  @ValueSource(strings = {"sink", "source-and-sink"})
+  void sinkOnlyBindingUsesTheSameUdsLifecycleAndReleasesEgress(String programInterface)
+      throws Exception {
     var vector = PluginProgramTestVectors.lifecycle("sink-shutdown");
     var workingDirectory = directory.resolve("sink-instance");
     var events = directory.resolve("sink-events.log");
@@ -161,11 +169,12 @@ final class PluginLifecycleIntegrationTest {
                       .setPayload(StringValue.of("command").toByteString())
                       .build()
                       .toByteArray());
-      var process = startProbe("sink", bells, server.socket(), events);
+      var process = startProbe(programInterface, bells, server.socket(), events);
       try {
         writeConfig(process, events);
         assertAttach(server.awaitMessage());
         assertTrue(server.awaitMessage().hasReady());
+        assertFalse(Files.exists(workingDirectory.resolve("source")));
         awaitRelease(egress, committed.receipt());
         awaitEvent(events, "sink-write-command");
 
@@ -174,12 +183,16 @@ final class PluginLifecycleIntegrationTest {
         assertTrue(server.awaitClientHalfClose());
         var result = awaitExit(process);
 
-        PluginProgramTestVectors.assertBusinessEvents(vector, events);
+        if (programInterface.equals("sink")) {
+          PluginProgramTestVectors.assertBusinessEvents(vector, events);
+        }
         assertEquals(0, result.exitCode());
         assertArrayEquals(new byte[0], result.output());
         assertFalse(result.error().contains("READY"));
         assertEquals(
-            "sink-start\nsink-write-command\nsink-close\n",
+            programInterface.equals("sink")
+                ? "sink-start\nsink-write-command\nsink-close\n"
+                : "owner-create\nowner-start\nsink-write-command\nowner-close\n",
             Files.readString(events).replace(System.lineSeparator(), "\n"));
       } finally {
         stop(process);

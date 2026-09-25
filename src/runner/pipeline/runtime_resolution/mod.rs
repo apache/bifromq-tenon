@@ -265,12 +265,6 @@ pub(in crate::runner) enum RuntimeResolutionIssue {
         flow_ids: Box<[FlowId]>,
     },
     #[schema(rename_all = "camelCase")]
-    PluginInterfaceUnbound {
-        #[schema(value_type = String)]
-        plugin_instance_id: PluginInstanceId,
-        interface: PluginInterface,
-    },
-    #[schema(rename_all = "camelCase")]
     FlowLuaRuntimeBindingInvalid {
         #[schema(value_type = String)]
         flow_id: FlowId,
@@ -290,35 +284,17 @@ impl InstanceBindings<'_> {
         program: &PluginProgramEntry,
         issues: &mut Vec<RuntimeResolutionIssue>,
     ) {
-        match (program.interface(), self.source) {
-            (PluginInterface::Sink, Some(flow)) => {
-                issues.push(RuntimeResolutionIssue::PluginSourceInterfaceMissing {
-                    plugin_instance_id: id.clone(),
-                    flow_id: flow.clone(),
-                });
-            }
-            (PluginInterface::Source | PluginInterface::SourceAndSink, None) => {
-                issues.push(RuntimeResolutionIssue::PluginInterfaceUnbound {
-                    plugin_instance_id: id.clone(),
-                    interface: PluginInterface::Source,
-                });
-            }
-            _ => {}
+        if let (PluginInterface::Sink, Some(flow)) = (program.interface(), self.source) {
+            issues.push(RuntimeResolutionIssue::PluginSourceInterfaceMissing {
+                plugin_instance_id: id.clone(),
+                flow_id: flow.clone(),
+            });
         }
-        match (program.interface(), self.sinks.is_empty()) {
-            (PluginInterface::Source, false) => {
-                issues.push(RuntimeResolutionIssue::PluginSinkInterfaceMissing {
-                    plugin_instance_id: id.clone(),
-                    flow_ids: self.sinks.iter().copied().cloned().collect(),
-                });
-            }
-            (PluginInterface::Sink | PluginInterface::SourceAndSink, true) => {
-                issues.push(RuntimeResolutionIssue::PluginInterfaceUnbound {
-                    plugin_instance_id: id.clone(),
-                    interface: PluginInterface::Sink,
-                });
-            }
-            _ => {}
+        if program.interface() == PluginInterface::Source && !self.sinks.is_empty() {
+            issues.push(RuntimeResolutionIssue::PluginSinkInterfaceMissing {
+                plugin_instance_id: id.clone(),
+                flow_ids: self.sinks.iter().copied().cloned().collect(),
+            });
         }
     }
 }

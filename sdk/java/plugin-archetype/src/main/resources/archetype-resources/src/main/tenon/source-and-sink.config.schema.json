@@ -5,11 +5,7 @@
   "description": "Replace this schema with the configuration accepted by the shared Source and Sink owner.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "message",
-    "queueIndex",
-    "outputFile"
-  ],
+  "required": [],
   "properties": {
     "message": {
       "type": "string",

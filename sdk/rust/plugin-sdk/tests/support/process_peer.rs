@@ -557,6 +557,10 @@ impl Peer {
         let source_flow = match &program {
             Program::Sink(_) => None,
             Program::Source(_) => Some((SOURCE_FLOW.to_owned(), source_parallelism(&config)?)),
+            Program::SourceAndSink(_) if config["boundSource"] == false => None,
+            Program::SourceAndSink(_) if sink_channels.is_empty() => {
+                Some((SOURCE_FLOW.to_owned(), source_parallelism(&config)?))
+            }
             Program::SourceAndSink(_) => {
                 let flow_id = sink_channels
                     .first()
@@ -580,7 +584,9 @@ impl Peer {
         };
         let sink_inputs = match &program {
             Program::Source(_) => None,
-            Program::Sink(_) | Program::SourceAndSink(_) => Some(sink_channels.as_slice()),
+            Program::Sink(_) | Program::SourceAndSink(_) => {
+                (!sink_channels.is_empty()).then_some(sink_channels.as_slice())
+            }
         };
         let bells = Bells::create(
             &working,
@@ -589,9 +595,7 @@ impl Peer {
                 .map(|(flow, count)| (flow.as_str(), *count)),
             sink_inputs,
         )?;
-        if matches!(program, Program::Source(_) | Program::SourceAndSink(_))
-            && existing_queues.is_none()
-        {
+        if source_flow.is_some() && existing_queues.is_none() {
             let source = working.join("source");
             std::fs::create_dir_all(&source)?;
             let frames = config["pendingRecords"].as_u64().unwrap_or(1) as usize + 1;
@@ -690,7 +694,7 @@ impl Peer {
                         serde_json::json!({
                             "flowId": channel.flow_id,
                             "channelId": channel.channel_id,
-                            "channelBellPath": channel.channel_bell_path.to_string_lossy(),
+                            "channelBellPath": flow_bell_path(&working, &channel.flow_id).to_string_lossy(),
                         })
                     })
                     .collect(),

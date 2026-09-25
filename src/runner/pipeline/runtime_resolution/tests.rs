@@ -136,7 +136,8 @@ fn missing_programs_aggregate_without_hiding_independent_flow_failures() -> io::
 }
 
 #[test]
-fn config_and_unbound_interface_errors_do_not_skip_complete_lua_bindings() -> io::Result<()> {
+fn config_errors_do_not_skip_lua_bindings_when_a_dual_program_is_used_as_source() -> io::Result<()>
+{
     let (_directory, mut store) = empty_store()?;
     let mut dual = program("com.example.dual", "source-and-sink");
     dual["configSchema"]["required"] = json!(["endpoint"]);
@@ -165,7 +166,6 @@ fn config_and_unbound_interface_errors_do_not_skip_complete_lua_bindings() -> io
             issues(&resolver.resolve(&verified, &store))?,
             json!([
                 {"code": "plugin_config_schema_mismatch", "pluginInstanceId": "device"},
-                {"code": "plugin_interface_unbound", "pluginInstanceId": "device", "interface": "sink"},
                 {"code": "flow_lua_runtime_binding_invalid", "flowId": "telemetry"}
             ]),
             "{source}"

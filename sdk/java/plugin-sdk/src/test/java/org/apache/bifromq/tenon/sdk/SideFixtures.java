@@ -68,7 +68,7 @@ final class SideFixtures {
 
   /** One Sink input whose Flow Region this fixture places under {@code directory}. */
   static FlowChannel flowChannel(Path directory, String flowId, int channelId) {
-    return new FlowChannel(flowId, channelId, flowBellPath(directory, flowId));
+    return new FlowChannel(flowId, channelId);
   }
 
   /** The Bell Regions one Source fixture creates, and the endpoints its Channel loops ring. */
@@ -143,12 +143,7 @@ final class SideFixtures {
       }
       var flows = new HashMap<String, BellRegion>();
       for (var entry : slotCounts.entrySet()) {
-        var path =
-            channels.stream()
-                .filter(channel -> channel.flowId().equals(entry.getKey()))
-                .findFirst()
-                .orElseThrow()
-                .channelBellPath();
+        var path = flowBellPath(directory, entry.getKey());
         flows.put(entry.getKey(), region(path, entry.getValue()));
       }
       return new SinkBells(loops, flows);
@@ -319,7 +314,7 @@ final class SideFixtures {
             .append(",\"channelId\":")
             .append(input.channelId())
             .append(",\"channelBellPath\":")
-            .append(quoted(input.channelBellPath().toString()))
+            .append(quoted(flowBellPath(workingDirectory, input.flowId()).toString()))
             .append('}');
       }
       json.append(']');

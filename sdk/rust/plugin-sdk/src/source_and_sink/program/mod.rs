@@ -31,8 +31,9 @@ use crate::process::{
 };
 use crate::sink::session::{BatchWriter, Queues, Session as SinkSession};
 use crate::source::session::Session as SourceSession;
-use crate::{Error, FlowChannel, PayloadSender, Value};
+use crate::{Error, FlowChannel, Ingress, Value};
 use prost::Message;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -41,8 +42,8 @@ use std::sync::{Arc, mpsc};
 /// Owns one shared business object and both queue sessions.
 pub struct SourceAndSinkProgram<P, B: TenonSourceAndSink<P>> {
     business: Arc<SharedWriter<B>>,
-    source: SourceSession,
-    sink: SinkSession,
+    source: Option<SourceSession>,
+    sink: Option<SinkSession>,
     control: ControlConnection,
     received: mpsc::Receiver<Event>,
     config: Value,
@@ -51,44 +52,70 @@ pub struct SourceAndSinkProgram<P, B: TenonSourceAndSink<P>> {
 }
 
 impl<P: Message + Default, B: TenonSourceAndSink<P>> SourceAndSinkProgram<P, B> {
-    /// Starts one owner. Business configuration decides which work to enable.
+    /// Starts one owner with the directions bound to this Instance.
     pub fn run<S: Message>(
-        factory: impl FnOnce(Value, usize, PayloadSender<S>) -> Result<B, Error>,
+        factory: impl FnOnce(Value, Option<Ingress<S>>, BTreeSet<FlowChannel>) -> Result<B, Error>,
     ) -> Self {
         install_panic_hook();
         let startup = {
             let mut input = std::io::stdin().lock();
             resolve(startup::read(std::env::args_os().skip(1), &mut input))
         };
-        let channel_bell_path = resolve(startup::require_channel_bell_path(&startup));
-        let channels = resolve(startup::require_sink_inputs(&startup));
+        let source_path = startup.bells.source_channel_region;
+        let sink_inputs = startup
+            .bells
+            .sink_inputs
+            .filter(|inputs| !inputs.is_empty());
+        if source_path.is_none() && sink_inputs.is_none() {
+            fatal(&"Source-and-sink Program has no bound direction");
+        }
+        let channels = sink_inputs
+            .as_ref()
+            .map(|inputs| inputs.iter().map(|input| input.channel.clone()).collect())
+            .unwrap_or_default();
         let (events, received) = mpsc::channel();
         let failed: FailureBoundary = Arc::new(|error| fatal(error.as_ref()));
+        let lifecycle = if source_path.is_some() {
+            Lifecycle::SourceCapable
+        } else {
+            Lifecycle::SinkOnly
+        };
         let control = resolve(ControlConnection::start(
             startup.control_socket,
             startup.launch_id,
-            Lifecycle::SourceCapable,
+            lifecycle,
             events,
             failed.clone(),
         ));
-        let source = resolve(SourceSession::open(
-            &startup.working_directory.join("source"),
-            &channel_bell_path,
-            failed,
-        ));
-        let queues = resolve(Queues::open(&startup.working_directory, channels));
-        let mut owner = resolve(factory(
-            startup.config.clone(),
-            source.parallelism(),
-            source.sender(),
-        ));
+        let source = source_path.map(|path| {
+            resolve(SourceSession::open(
+                &startup.working_directory.join("source"),
+                &path,
+                failed.clone(),
+            ))
+        });
+        let ingress = source.as_ref().map(|source| Ingress {
+            parallelism: source.parallelism(),
+            sender: source.sender(),
+        });
+        let queues =
+            sink_inputs.map(|inputs| resolve(Queues::open(&startup.working_directory, inputs)));
+        let mut owner = resolve(factory(startup.config.clone(), ingress, channels));
         owner.start();
         let business = Arc::new(SharedWriter(owner));
-        let sink = resolve(SinkSession::start(
-            queues,
-            business.clone(),
-            source.failure_handler(),
-        ));
+        let sink = queues.map(|queues| {
+            if let Some(source) = &source {
+                resolve(SinkSession::start(
+                    queues,
+                    business.clone(),
+                    source.failure_handler(),
+                ))
+            } else {
+                resolve(SinkSession::start(queues, business.clone(), move |error| {
+                    fatal(error.as_ref())
+                }))
+            }
+        });
         Self {
             business,
             source,
@@ -108,17 +135,29 @@ impl<P: Message + Default, B: TenonSourceAndSink<P>> SourceAndSinkProgram<P, B> 
 
     /// Publishes Ready and owns Source quiesce and final shutdown.
     pub fn await_shutdown(mut self) {
-        resolve(self.source.check_running());
+        if let Some(source) = &self.source {
+            resolve(source.check_running());
+        }
         self.control.publish(Publish::Ready);
-        self.sink.activate();
+        if let Some(sink) = &self.sink {
+            sink.activate();
+        }
         while let Event::Quiesce = self.received.recv().expect("control owns lifecycle events") {
-            self.source.stop_accepting();
+            let source = self
+                .source
+                .as_mut()
+                .expect("control permits quiesce only with Source bound");
+            source.stop_accepting();
             self.business.0.quiesce();
-            resolve(self.source.quiesce());
+            resolve(source.quiesce());
             self.control.publish(Publish::Quiesced);
         }
-        resolve(self.source.close());
-        resolve(self.sink.close());
+        if let Some(source) = &mut self.source {
+            resolve(source.close());
+        }
+        if let Some(sink) = &mut self.sink {
+            resolve(sink.close());
+        }
         Arc::get_mut(&mut self.business)
             .expect("all Sink workers joined")
             .0

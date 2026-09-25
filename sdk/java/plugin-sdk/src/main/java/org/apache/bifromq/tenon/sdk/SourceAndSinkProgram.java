@@ -24,7 +24,10 @@ import com.google.protobuf.Parser;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.ServiceLoader;
+import java.util.Set;
+import java.util.stream.Collectors;
 import tools.jackson.databind.JsonNode;
 
 /** Owns one source-and-sink Program with one control stream and one shared business owner. */
@@ -40,9 +43,9 @@ public final class SourceAndSinkProgram<S extends MessageLite, T extends Message
       TenonSourceAndSink<T> business,
       SinkProgramOwner<T> sinkOwner) {
     this.runtime = Objects.requireNonNull(runtime, "runtime");
-    this.sourceSession = Objects.requireNonNull(sourceSession, "sourceSession");
+    this.sourceSession = sourceSession;
     this.business = Objects.requireNonNull(business, "business");
-    this.sinkOwner = Objects.requireNonNull(sinkOwner, "sinkOwner");
+    this.sinkOwner = sinkOwner;
   }
 
   /**
@@ -66,29 +69,59 @@ public final class SourceAndSinkProgram<S extends MessageLite, T extends Message
     Objects.requireNonNull(sinkPayloadParser, "sinkPayloadParser");
     var startup = PluginProgramRuntime.startSourceAndSink(arguments);
     var runtime = startup.runtime();
-    var sourceSession =
-        SourceSession.<S>open(
-            runtime.workingDirectory().resolve("source"), startup.channelBellPath());
+    SourceSession<S> sourceSession = null;
+    if (startup.channelBellPath() != null) {
+      sourceSession =
+          SourceSession.open(
+              runtime.workingDirectory().resolve("source"), startup.channelBellPath());
+    }
     TenonSourceAndSink<T> sharedOwner;
     var factory = SourceAndSinkProgram.<S, T>loadFactory();
     sharedOwner =
         Objects.requireNonNull(
-            factory.create(runtime.config(), sourceSession.parallelism(), sourceSession.sender()),
+            factory.create(
+                runtime.config(),
+                sourceSession == null
+                    ? Optional.empty()
+                    : Optional.of(
+                        new Ingress<>(sourceSession.parallelism(), sourceSession.sender())),
+                startup.channels() == null
+                    ? Set.of()
+                    : startup.channels().stream()
+                        .map(SinkInput::channel)
+                        .collect(Collectors.toUnmodifiableSet())),
             "TenonSourceAndSinkFactory returned null");
 
-    SinkProgramOwner<T> sinkOwner;
-    sinkOwner =
-        SinkProgramOwner.open(
-            sharedOwner, runtime.workingDirectory(), startup.channels(), sinkPayloadParser);
-    sinkOwner.failure().whenComplete((ignored, error) -> sourceSession.fail(error));
-    sourceSession
-        .failure()
-        .whenComplete(
-            (ignored, error) -> {
-              if (error != null) PluginProgramRuntime.terminateProcess(error);
-            });
+    SinkProgramOwner<T> sinkOwner = null;
+    if (startup.channels() != null && !startup.channels().isEmpty()) {
+      sinkOwner =
+          SinkProgramOwner.open(
+              sharedOwner, runtime.workingDirectory(), startup.channels(), sinkPayloadParser);
+    }
+    if (sourceSession != null) {
+      var source = sourceSession;
+      if (sinkOwner != null) {
+        sinkOwner.failure().whenComplete((ignored, error) -> source.fail(error));
+      }
+      source
+          .failure()
+          .whenComplete(
+              (ignored, error) -> {
+                if (error != null) PluginProgramRuntime.terminateProcess(error);
+              });
+    }
+    if (sourceSession == null) {
+      sinkOwner
+          .failure()
+          .whenComplete(
+              (ignored, error) -> {
+                if (error != null) PluginProgramRuntime.terminateProcess(error);
+              });
+    }
     sharedOwner.start();
-    sinkOwner.startPaused();
+    if (sinkOwner != null) {
+      sinkOwner.startPaused();
+    }
     return new SourceAndSinkProgram<>(runtime, sourceSession, sharedOwner, sinkOwner);
   }
 
@@ -101,15 +134,23 @@ public final class SourceAndSinkProgram<S extends MessageLite, T extends Message
   public void awaitShutdown() {
     try {
       runtime.publishReady();
-      sinkOwner.activate();
-      runtime.awaitSourceQuiesce(sourceSession.failure());
-      sourceSession.stopAccepting();
-      business.quiesce();
-      sourceSession.quiesce();
-      runtime.publishSourceQuiesced();
-      runtime.awaitShutdown(sourceSession.failure());
-      sourceSession.close();
-      sinkOwner.stopWorkers();
+      if (sinkOwner != null) {
+        sinkOwner.activate();
+      }
+      if (sourceSession != null) {
+        runtime.awaitSourceQuiesce(sourceSession.failure());
+        sourceSession.stopAccepting();
+        business.quiesce();
+        sourceSession.quiesce();
+        runtime.publishSourceQuiesced();
+        runtime.awaitShutdown(sourceSession.failure());
+        sourceSession.close();
+      } else {
+        runtime.awaitShutdown(sinkOwner.failure());
+      }
+      if (sinkOwner != null) {
+        sinkOwner.stopWorkers();
+      }
       business.close();
       runtime.completeShutdown();
     } catch (Throwable error) {

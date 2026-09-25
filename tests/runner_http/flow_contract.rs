@@ -162,7 +162,7 @@ fn invalid_document_requests_preserve_the_document_and_live_resources() -> io::R
 }
 
 #[test]
-fn missing_or_unused_interfaces_persist_as_unready_without_launching() -> io::Result<()> {
+fn missing_interfaces_persist_as_unready_without_launching() -> io::Result<()> {
     let directory = tempfile::tempdir()?;
     let address = available_address()?;
     let config = write_config(directory.path(), address)?;
@@ -170,11 +170,6 @@ fn missing_or_unused_interfaces_persist_as_unready_without_launching() -> io::Re
     wait_for_http(&mut runner, address)?;
     install_interfaces(address)?;
     let before = runtime_snapshot(&directory.path().join("pipelines"))?;
-    let mut unbound = loop_document("unbound-sink", "com.example.gateway");
-    unbound["pluginInstances"]["sink"] = serde_json::json!({
-        "programName": "com.example.kafka", "exactVersion": "1.0.0", "config": {}
-    });
-    unbound["flows"]["main"]["sinks"] = serde_json::json!(["sink"]);
     for (document, expected) in [
         (
             loop_document("missing-source-interface", "com.example.kafka"),
@@ -184,7 +179,6 @@ fn missing_or_unused_interfaces_persist_as_unready_without_launching() -> io::Re
             loop_document("missing-sink-interface", "com.example.modbus"),
             "plugin_sink_interface_missing",
         ),
-        (unbound, "plugin_interface_unbound"),
     ] {
         let id = document["id"]
             .as_str()

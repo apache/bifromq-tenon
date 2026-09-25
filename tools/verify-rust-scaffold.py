@@ -101,7 +101,13 @@ def verify(directory):
         for field in example:
             invalid_config = dict(example)
             del invalid_config[field]
-            assert not validator.is_valid(invalid_config), f"Missing {field} must be rejected"
+            if interface != "source-and-sink":
+                assert not validator.is_valid(invalid_config), f"Missing {field} must be rejected"
+            else:
+                # A combined plugin can run with either direction unbound. The
+                # runtime requires a field only when its corresponding direction
+                # is actually present in the Flow topology.
+                assert validator.is_valid(invalid_config), f"Missing {field} must be accepted for a combined plugin"
             invalid_config[field] = 42
             assert not validator.is_valid(invalid_config), f"Wrong {field} type must be rejected"
         if "message" in example:
@@ -197,6 +203,7 @@ def verify(directory):
 
     for scenario in ["drained", "runner-lost"]:
         verify_runner(runner, bundles, scenario)
+    verify_runner(runner, bundles, "drained", chain_programs=("source-and-sink", "source-and-sink"))
     for interface in bundles:
         instrument_business(directory / f"example-{interface}", interface)
         bundles[interface] = rebuild_bundle(interface)
@@ -225,7 +232,7 @@ def instrument_business(project, interface):
         source = project / "src/source/mod.rs"
         replace(source, "    payload: SourceRecordPayload,",
                 "    completion: Option<tenon_plugin_sdk::Completion>,\n    payload: SourceRecordPayload,")
-        replace(source, "        Self {", "        Self {\n            completion: None,")
+        replace(source, "        Ok(Self {", "        Ok(Self {\n            completion: None,")
         replace(source, '        std::thread::spawn(move || eprintln!("Source completion: {:?}", completion.wait()));',
                 '        self.completion = Some(completion);')
         replace(source, '        // The SDK has settled the completion; no external resource remains.', '''        crate::shutdown_probe::event("source-close").expect("record Source close");
@@ -238,7 +245,12 @@ def instrument_business(project, interface):
         crate::shutdown_probe::event(&format!("completion {result:?}")).expect("record completion");''')
     if interface != "source":
         business = project / "src/file_program/mod.rs"
-        replace(business, '        ready(self.output.write(&records))', '''        ready((|| {
+        write_call = ('        ready(self.output.write(&records))'
+                      if interface == "sink" else '''        ready(match &self.output {
+            Some(output) => output.write(&records),
+            None => Err(std::io::Error::other("Sink direction is not bound").into()),
+        })''')
+        replace(business, write_call, '''        ready((|| {
             crate::shutdown_probe::event(&format!("write-entered {}", std::process::id()))?;
             let mut permission = [0];
             std::io::Read::read_exact(
@@ -252,6 +264,9 @@ def instrument_business(project, interface):
                 _ => unreachable!("the verifier sends only success or failure"),
             }
         })())''')
+        if interface == "source-and-sink":
+            replace(business, '            self.output.write(&records)?;',
+                    '            self.output.as_ref().expect("Sink is bound in this scenario").write(&records)?;')
         replace(business, '        // Every successful batch is already durable; dropping this owner closes the file.',
                 '        crate::shutdown_probe::event("sink-close").expect("record Sink close");\n'
                 '        // Every successful batch is already durable; dropping this owner closes the file.')
@@ -267,7 +282,7 @@ def instrument_quiesce(project):
         crate::shutdown_probe::event("quiesce-pending").expect("record quiesce");''')
 
 
-def verify_runner(runner, bundles, scenario):
+def verify_runner(runner, bundles, scenario, *, chain_programs=("source", "sink")):
     # Keep the state root short enough for the platform's UDS path limit.
     state = Path(tempfile.mkdtemp(prefix="tenon-rust-runner-", dir="/tmp"))
     gates = ExitStack()
@@ -323,7 +338,7 @@ def verify_runner(runner, bundles, scenario):
                                 status, _, body = request("POST", "/plugins", bundle.read_bytes(),
                                                           {"Content-Type": "application/vnd.apache.tenon.plugin+tar+gzip"})
                                 assert status == expected, (status, body)
-                        for identity, source, sink in [("rust-chain", "source", "sink"),
+                        for identity, source, sink in [("rust-chain", *chain_programs),
                                                        ("rust-loop", "source-and-sink", "source-and-sink")]:
                             output = state / f"{identity}.txt"
                             if scenario not in ("drained", "runner-lost"):
@@ -339,7 +354,7 @@ def verify_runner(runner, bundles, scenario):
                                             os.fdopen(descriptor, "wb", buffering=0))
                             instance = lambda role, config: {"programName": f"com.example.example-{role}",
                                                               "exactVersion": "0.1.0", "config": config}
-                            if source == sink:
+                            if identity == "rust-loop":
                                 instances = {"shared": instance(source, {"message": identity, "outputFile": str(output)})}
                                 source_id = sink_id = "shared"
                             else:
@@ -517,7 +532,7 @@ def verify_runner(runner, bundles, scenario):
                             continue
                         raise AssertionError(f"Process {pid} survived normal Runner shutdown")
                     assert not list((state / "pipelines").iterdir()), "Runner left runtime files after normal shutdown"
-                    print(f"PASS: {scenario}, launch {launch + 1}: both flows verified, all five children reaped and runtime files removed", flush=True)
+                    print(f"PASS: {scenario}, chain {chain_programs}, launch {launch + 1}: both flows verified, all five children reaped and runtime files removed", flush=True)
                 except BaseException:
                     log.flush()
                     log.seek(0)

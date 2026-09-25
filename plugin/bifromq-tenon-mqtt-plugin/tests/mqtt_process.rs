@@ -77,12 +77,11 @@ async fn send_connack(stream: &mut TcpStream, session_present: bool) -> Result<(
 }
 
 /// The 96 Channels one saturated Sink owns, one Channel per Flow.
-fn saturated_channels(working: &Path) -> Vec<FlowChannel> {
+fn saturated_channels(_working: &Path) -> Vec<FlowChannel> {
     (0..96)
         .map(|index| {
             let flow_id = format!("flow-{index}");
             FlowChannel {
-                channel_bell_path: peer::flow_bell_path(working, &flow_id),
                 flow_id,
                 channel_id: 0,
             }
@@ -91,9 +90,8 @@ fn saturated_channels(working: &Path) -> Vec<FlowChannel> {
 }
 
 /// The single Channel one reconnect test drives.
-fn resumed_channel(working: &Path) -> Vec<FlowChannel> {
+fn resumed_channel(_working: &Path) -> Vec<FlowChannel> {
     vec![FlowChannel {
-        channel_bell_path: peer::flow_bell_path(working, "flow-0"),
         flow_id: "flow-0".into(),
         channel_id: 0,
     }]

@@ -38,13 +38,23 @@ const DEADLINE: Duration = Duration::from_secs(5);
 const CHANNELS_BELL_FILE_NAME: &str = "channels.bells";
 
 /// The inputs one Sink fixture owns: two Channels of one Flow and one of another.
-fn inputs(directory: &Path) -> Vec<FlowChannel> {
+fn inputs(_directory: &Path) -> Vec<FlowChannel> {
     [("flow-a", 0_u32), ("flow-a", 1), ("flow-b", 0)]
         .into_iter()
         .map(|(flow_id, channel_id)| FlowChannel {
             flow_id: flow_id.to_owned(),
             channel_id,
-            channel_bell_path: flow_bell_path(directory, flow_id),
+        })
+        .collect()
+}
+
+fn sink_inputs(directory: &Path, channels: &[FlowChannel]) -> Vec<SinkInput> {
+    channels
+        .iter()
+        .cloned()
+        .map(|channel| SinkInput {
+            channel_bell_path: flow_bell_path(directory, &channel.flow_id),
+            channel,
         })
         .collect()
 }
@@ -96,12 +106,7 @@ impl Bells {
                 .or_insert(slots);
         }
         for (flow_id, slots) in flow_slots {
-            let path = channels
-                .iter()
-                .find(|channel| channel.flow_id == flow_id)
-                .ok_or("missing Flow")?
-                .channel_bell_path
-                .clone();
+            let path = flow_bell_path(directory, &flow_id);
             flows.insert(flow_id, region_at(&path, slots)?);
         }
         Ok(Self { loops, flows })
@@ -209,7 +214,7 @@ impl Fixture {
         let (writes, received) = mpsc::channel();
         let (events, notifications) = mpsc::channel();
         let session = Session::start(
-            Queues::open(directory.path(), channels.clone())?,
+            Queues::open(directory.path(), sink_inputs(directory.path(), &channels))?,
             Arc::new(RecordingSink(writes)),
             move |error| {
                 events.send(error).expect("test observes Queue failure");
@@ -508,7 +513,6 @@ fn stopping_during_a_result_poll_ignores_the_late_result_and_late_wakes() -> Res
         let channel = FlowChannel {
             flow_id: "poll-race".into(),
             channel_id: 0,
-            channel_bell_path: flow_bell_path(directory.path(), "poll-race"),
         };
         let bells = Bells::create(directory.path(), std::slice::from_ref(&channel))?;
         let path = channel.queue_path(directory.path());
@@ -543,7 +547,10 @@ fn stopping_during_a_result_poll_ignores_the_late_result_and_late_wakes() -> Res
         }
         let (events, failures) = mpsc::channel();
         let mut session = Session::start(
-            Queues::open(directory.path(), vec![channel.clone()])?,
+            Queues::open(
+                directory.path(),
+                sink_inputs(directory.path(), std::slice::from_ref(&channel)),
+            )?,
             Arc::new(PausedPoll {
                 polling,
                 permission: Mutex::new(permission),

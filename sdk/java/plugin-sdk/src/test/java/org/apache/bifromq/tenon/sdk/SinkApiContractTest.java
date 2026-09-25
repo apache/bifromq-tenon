@@ -48,7 +48,7 @@ final class SinkApiContractTest {
     var channel = Class.forName("org.apache.bifromq.tenon.sdk.FlowChannel");
     assertEquals(true, channel.isRecord());
     assertEquals(
-        List.of("flowId", "channelId", "channelBellPath"),
+        List.of("flowId", "channelId"),
         Arrays.stream(channel.getRecordComponents())
             .map(component -> component.getName())
             .toList());
