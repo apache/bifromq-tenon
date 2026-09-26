@@ -35,7 +35,7 @@
 //! module owns all `mlua` installation, fixed-size argument rendering, and
 //! callback invocation without knowing the destination state.
 
-use self::metrics::VmMetrics;
+use self::{memory::LuaNativeMemoryBudget, metrics::VmMetrics};
 use crate::config::ScriptVmLimits;
 use crate::contracts::core::DIAGNOSTIC_TEXT_MAXIMUM_BYTES;
 use crate::identifiers::SinkContractId;
@@ -60,12 +60,13 @@ mod bytes;
 mod emit;
 mod event;
 mod json;
+mod memory;
 pub(crate) mod metrics;
 mod payload;
 mod timer;
 
 pub(crate) use emit::EmitBoundary;
-pub(crate) use timer::{TimerSchedule, TimerSlotInactive};
+pub(crate) use timer::{TimerEvent, TimerSchedule, TimerSlotInactive};
 
 const HOOK_INSTRUCTION_INTERVAL: u32 = 1_000;
 const INTERNAL_CPU_LIMIT_ERROR: &str = "Tenon Lua CPU time limit exceeded";
@@ -459,7 +460,7 @@ pub(crate) struct LuaVm {
     emit_slot: emit::EmitSlot,
     timer_slot: timer::TimerSlot,
     cpu_time_limit: Duration,
-    payload_memory: Rc<payload::PayloadMemoryBudget>,
+    native_memory_budget: Rc<LuaNativeMemoryBudget>,
     metrics: Option<VmMetrics>,
 }
 
@@ -511,6 +512,37 @@ impl LuaVm {
         stop_requested: impl Fn() -> bool + 'static,
         metrics: Option<VmMetrics>,
     ) -> Result<Self, LuaVmError> {
+        Self::load_observed_at(
+            source,
+            limits,
+            max_record_bytes,
+            source_payload_root,
+            sink_payload_roots,
+            print,
+            stop_requested,
+            metrics,
+            Instant::now(),
+            Rc::new(Cell::new(0)),
+        )
+    }
+
+    /// Uses the Channel timeline and ordering sequence across VM replacements.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "VM construction receives runtime, contract, observation, and Channel timeline inputs"
+    )]
+    pub(crate) fn load_observed_at(
+        source: &str,
+        limits: ScriptVmLimits,
+        max_record_bytes: NonZeroU64,
+        source_payload_root: MessageDescriptor,
+        sink_payload_roots: HashMap<SinkContractId, MessageDescriptor>,
+        print: LuaPrintCallback,
+        stop_requested: impl Fn() -> bool + 'static,
+        metrics: Option<VmMetrics>,
+        timer_origin: Instant,
+        event_order: Rc<Cell<u64>>,
+    ) -> Result<Self, LuaVmError> {
         let lua = Lua::new_with(
             StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::UTF8 | StdLib::OS,
             LuaOptions::default(),
@@ -526,6 +558,8 @@ impl LuaVm {
             limits.memory_bytes().get(),
             max_record_bytes,
             print,
+            timer_origin,
+            event_order,
         )
         .map_err(|source| LuaVmError::with_source(LuaVmErrorKind::InitializationFailed, source))?;
 
@@ -557,7 +591,7 @@ impl LuaVm {
             emit_slot: sandbox.emit_slot,
             timer_slot: sandbox.timer_slot,
             cpu_time_limit: limits.cpu_time(),
-            payload_memory: sandbox.payload_memory,
+            native_memory_budget: sandbox.native_memory_budget,
             metrics,
         };
         vm.publish_memory();
@@ -583,31 +617,37 @@ impl LuaVm {
         Ok(self.call_main_ready(&event))
     }
 
-    pub(crate) fn call_timer(&mut self, timestamp_millis: i64) -> LuaMainOutcome {
+    pub(crate) fn call_timer_event(
+        &mut self,
+        timestamp_millis: i64,
+        timer: TimerEvent,
+    ) -> LuaMainOutcome {
         if let Some(outcome) = self.terminal_outcome() {
             return outcome;
         }
 
         self.call_main_ready(&event::ProcessEvent::Timer {
             timestamp: event::KernelTimestampMillis(timestamp_millis),
+            id: timer.id,
+            eligible_at: event::KernelTimestampMillis(timer.eligible_at),
         })
     }
 
-    pub(crate) fn scheduled_timer(&self) -> Option<TimerSchedule> {
+    pub(crate) fn next_timer_event(&self) -> Option<TimerEvent> {
         if self.terminal_error_kind().is_some() {
             None
         } else {
-            self.timer_slot.schedule()
+            self.timer_slot.next_event()
         }
     }
 
-    pub(crate) fn begin_timer(&self) -> Result<(), TimerSlotInactive> {
+    pub(crate) fn begin_timer(&self) -> Result<TimerEvent, TimerSlotInactive> {
         self.timer_slot.begin()
     }
 
     fn publish_memory(&self) {
         if let Some(metrics) = &self.metrics {
-            metrics.publish_memory(self.lua.used_memory() + self.payload_memory.used_bytes());
+            metrics.publish_memory(self.lua.used_memory() + self.native_memory_budget.used_bytes());
         }
     }
 
@@ -768,10 +808,14 @@ struct Sandbox {
     protected_names: Rc<RefCell<HashSet<Vec<u8>>>>,
     emit_slot: emit::EmitSlot,
     timer_slot: timer::TimerSlot,
-    payload_memory: Rc<payload::PayloadMemoryBudget>,
+    native_memory_budget: Rc<LuaNativeMemoryBudget>,
 }
 
 impl Sandbox {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Sandbox installation binds VM resource owners and the Channel timeline"
+    )]
     fn install(
         lua: &Lua,
         fatal_fault: Rc<Cell<Option<LuaVmFatalFault>>>,
@@ -780,6 +824,8 @@ impl Sandbox {
         memory_limit_bytes: usize,
         max_record_bytes: NonZeroU64,
         print: LuaPrintCallback,
+        timer_origin: Instant,
+        event_order: Rc<Cell<u64>>,
     ) -> mlua::Result<Self> {
         let native_globals = lua.globals();
         let guards = SandboxGuards {
@@ -789,7 +835,7 @@ impl Sandbox {
         let environment_values = lua.create_table()?;
         let environment = lua.create_table()?;
         let emit_slot = emit::EmitSlot::default();
-        let timer_slot = timer::TimerSlot::default();
+        let timer_slot = timer::TimerSlot::new(timer_origin, event_order);
 
         install_environment_metatable(
             lua,
@@ -869,6 +915,20 @@ impl Sandbox {
             Rc::clone(&guards.fatal_fault),
             Rc::clone(&execution_budget),
         )?;
+        let native_memory_budget = Rc::new(LuaNativeMemoryBudget::new(
+            lua,
+            memory_limit_bytes,
+            Rc::clone(&guards.fatal_fault),
+        ));
+        payload::install(
+            lua,
+            &environment_values,
+            Rc::clone(&guards.protected_names),
+            Rc::clone(&guards.fatal_fault),
+            Rc::clone(&execution_budget),
+            payload_registry,
+            Rc::clone(&native_memory_budget),
+        )?;
         timer::install(
             lua,
             &environment_values,
@@ -876,15 +936,7 @@ impl Sandbox {
             Rc::clone(&guards.fatal_fault),
             Rc::clone(&execution_budget),
             timer_slot.clone(),
-        )?;
-        let payload_memory = payload::install(
-            lua,
-            &environment_values,
-            Rc::clone(&guards.protected_names),
-            Rc::clone(&guards.fatal_fault),
-            Rc::clone(&execution_budget),
-            payload_registry,
-            memory_limit_bytes,
+            Rc::clone(&native_memory_budget),
         )?;
 
         environment_values.raw_set("_G", environment.clone())?;
@@ -905,7 +957,7 @@ impl Sandbox {
             protected_names: guards.protected_names,
             emit_slot,
             timer_slot,
-            payload_memory,
+            native_memory_budget,
         })
     }
 }

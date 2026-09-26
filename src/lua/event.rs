@@ -43,6 +43,8 @@ pub(super) enum ProcessEvent {
     },
     Timer {
         timestamp: KernelTimestampMillis,
+        id: Option<Box<str>>,
+        eligible_at: KernelTimestampMillis,
     },
 }
 
@@ -167,9 +169,15 @@ pub(super) fn project(
                 project_source_message(lua, payload, Rc::clone(&fatal_fault))?,
             )?;
         }
-        ProcessEvent::Timer { timestamp } => {
+        ProcessEvent::Timer {
+            timestamp,
+            id,
+            eligible_at,
+        } => {
             backing.raw_set("type", "timer")?;
             backing.raw_set("timestamp", timestamp.0)?;
+            backing.raw_set("id", id.as_deref())?;
+            backing.raw_set("eligibleAt", eligible_at.0)?;
         }
     }
     install_readonly_backing(lua, backing, fatal_fault)

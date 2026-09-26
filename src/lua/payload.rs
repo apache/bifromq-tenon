@@ -35,19 +35,19 @@
 
 use super::{
     ExecutionBudget, LuaApiFailure, LuaApiResult, LuaVmFatalFault,
-    create_catchable_api_wrapper_factory, finish_api_call, protect_name, record_fatal_fault,
+    create_catchable_api_wrapper_factory, finish_api_call, memory::LuaNativeMemoryBudget,
+    protect_name,
 };
 use crate::identifiers::SinkContractId;
 use mlua::{
     AnyUserData, Function, Lua, LuaString, MetaMethod, MultiValue, Table, UserData, UserDataFields,
-    UserDataMethods, Value as LuaValue, WeakLua,
+    UserDataMethods, Value as LuaValue,
 };
 use prost_reflect::{
     DynamicMessage, FieldDescriptor, Kind, MapKey, MessageDescriptor, Value as ProtobufValue,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::rc::Rc;
 use std::str;
 
@@ -107,7 +107,7 @@ struct PayloadBinding {
 struct LuaPayloadRuntime {
     fatal_fault: Rc<Cell<Option<LuaVmFatalFault>>>,
     execution_budget: Rc<RefCell<Option<ExecutionBudget>>>,
-    memory_budget: Rc<PayloadMemoryBudget>,
+    memory_budget: Rc<LuaNativeMemoryBudget>,
     wrapper_factory: Function,
 }
 
@@ -315,16 +315,12 @@ pub(super) fn install(
     fatal_fault: Rc<Cell<Option<LuaVmFatalFault>>>,
     execution_budget: Rc<RefCell<Option<ExecutionBudget>>>,
     registry: FrozenPayloadRegistry,
-    memory_limit_bytes: usize,
-) -> mlua::Result<Rc<PayloadMemoryBudget>> {
+    memory_budget: Rc<LuaNativeMemoryBudget>,
+) -> mlua::Result<()> {
     let runtime = Rc::new(LuaPayloadRuntime {
-        fatal_fault: Rc::clone(&fatal_fault),
+        fatal_fault,
         execution_budget,
-        memory_budget: Rc::new(PayloadMemoryBudget::new(
-            lua,
-            memory_limit_bytes,
-            fatal_fault,
-        )),
+        memory_budget,
         wrapper_factory: create_catchable_api_wrapper_factory(lua)?,
     });
     let prototypes = BuilderPrototypeCatalog::compile(lua, &registry, Rc::clone(&runtime))?;
@@ -349,7 +345,7 @@ pub(super) fn install(
     let registry = lua.create_userdata(RegistryUserData { get_builder })?;
     environment_values.raw_set("registry", registry)?;
     protect_name(&protected_names, "registry");
-    Ok(Rc::clone(&context.runtime.memory_budget))
+    Ok(())
 }
 
 fn get_builder(
@@ -922,98 +918,14 @@ fn require_no_arguments(arguments: &MultiValue, message: &'static str) -> LuaApi
     }
 }
 
-pub(super) struct PayloadMemoryBudget {
-    lua: WeakLua,
-    limit_bytes: usize,
-    used_bytes: Cell<usize>,
-    fatal_fault: Rc<Cell<Option<LuaVmFatalFault>>>,
-}
-
-impl fmt::Debug for PayloadMemoryBudget {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PayloadMemoryBudget")
-            .field("limit_bytes", &self.limit_bytes)
-            .field("used_bytes", &self.used_bytes.get())
-            .finish_non_exhaustive()
-    }
-}
-
-impl PayloadMemoryBudget {
-    pub(super) fn used_bytes(&self) -> usize {
-        self.used_bytes.get()
-    }
-
-    fn new(lua: &Lua, limit_bytes: usize, fatal_fault: Rc<Cell<Option<LuaVmFatalFault>>>) -> Self {
-        Self {
-            lua: lua.weak(),
-            limit_bytes,
-            used_bytes: Cell::new(0),
-            fatal_fault,
-        }
-    }
-
-    fn replace(&self, previous_bytes: usize, next_bytes: usize) -> LuaApiResult<()> {
-        let used_bytes = self.used_bytes.get();
-        let retained_bytes = used_bytes
-            .checked_sub(previous_bytes)
-            .ok_or(LuaApiFailure::InternalInvariantViolation)?;
-        let next_used_bytes = retained_bytes
-            .checked_add(next_bytes)
-            .ok_or(LuaApiFailure::MemoryExceeded)?;
-        let lua = self
-            .lua
-            .try_upgrade()
-            .ok_or(LuaApiFailure::InternalInvariantViolation)?;
-        let next_lua_limit = self
-            .limit_bytes
-            .checked_sub(next_used_bytes)
-            .ok_or(LuaApiFailure::MemoryExceeded)?;
-        if lua.used_memory() > next_lua_limit {
-            return Err(LuaApiFailure::MemoryExceeded);
-        }
-        lua.set_memory_limit(next_lua_limit)
-            .map_err(|_| LuaApiFailure::InternalInvariantViolation)?;
-        self.used_bytes.set(next_used_bytes);
-        Ok(())
-    }
-
-    fn release(&self, bytes: usize) {
-        let Some(next_used_bytes) = self.used_bytes.get().checked_sub(bytes) else {
-            record_fatal_fault(
-                &self.fatal_fault,
-                LuaVmFatalFault::InternalInvariantViolation,
-            );
-            return;
-        };
-        self.used_bytes.set(next_used_bytes);
-        let Some(lua) = self.lua.try_upgrade() else {
-            return;
-        };
-        let Some(next_lua_limit) = self.limit_bytes.checked_sub(next_used_bytes) else {
-            record_fatal_fault(
-                &self.fatal_fault,
-                LuaVmFatalFault::InternalInvariantViolation,
-            );
-            return;
-        };
-        if lua.set_memory_limit(next_lua_limit).is_err() {
-            record_fatal_fault(
-                &self.fatal_fault,
-                LuaVmFatalFault::InternalInvariantViolation,
-            );
-        }
-    }
-}
-
 #[derive(Debug)]
 struct PayloadMemoryReservation {
-    budget: Rc<PayloadMemoryBudget>,
+    budget: Rc<LuaNativeMemoryBudget>,
     bytes: usize,
 }
 
 impl PayloadMemoryReservation {
-    fn reserve(budget: Rc<PayloadMemoryBudget>, bytes: usize) -> LuaApiResult<Self> {
+    fn reserve(budget: Rc<LuaNativeMemoryBudget>, bytes: usize) -> LuaApiResult<Self> {
         budget.replace(0, bytes)?;
         Ok(Self { budget, bytes })
     }

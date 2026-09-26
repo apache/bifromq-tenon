@@ -23,9 +23,12 @@
 //! Lua VM. Runtime routes remain separate live owners; this value only
 //! verifies that their Sink Contract identities match the frozen Payload registry.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use prost_reflect::MessageDescriptor;
 
@@ -86,9 +89,11 @@ impl FlowChannelSpec {
         diagnostics: ChannelDiagnosticPublisher,
         metrics: &ChannelMetrics,
         stop_requested: impl Fn() -> bool + 'static,
+        timer_origin: Instant,
+        event_order: Rc<Cell<u64>>,
     ) -> Result<(LuaVm, LuaDiagnosticPublisher), LuaVmError> {
         let lua_vm_diagnostics = diagnostics.lua_vm();
-        let lua_vm = LuaVm::load_observed(
+        let lua_vm = LuaVm::load_observed_at(
             &self.lua_source,
             self.lua_limits,
             self.max_record_bytes,
@@ -97,6 +102,8 @@ impl FlowChannelSpec {
             lua_vm_diagnostics.clone().into_print_callback(),
             stop_requested,
             metrics.lua(),
+            timer_origin,
+            event_order,
         )
         .inspect_err(|error| {
             if error.kind() != LuaVmErrorKind::ExecutionStopped {
