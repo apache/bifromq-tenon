@@ -494,7 +494,7 @@ fn source_decode_failure_without_older_pending_preserves_lua_state() -> io::Resu
         function main(event)
             count = count + 1
             if event.payload.deviceId == "before" then
-                clearTimerTask()
+                clearTimeout()
             elseif event.payload.deviceId == "after" then
                 if count ~= 2 or hasTimeout() then
                     error("Lua state was unexpectedly rebuilt")
@@ -837,7 +837,11 @@ fn source_session_finish_keeps_the_original_timer_and_lua_state_after_interrupti
             process_one_source(&mut channel)?,
             FlowChannelStep::EventProcessed
         );
-        let original_timer = channel.lua_vm().map_err(channel_error)?.scheduled_timer();
+        let original_timer = channel
+            .lua_vm()
+            .map_err(channel_error)?
+            .next_timer_event()
+            .map(|timer| timer.schedule);
         assert!(original_timer.is_some());
         // A non-stop interruption must only recheck the same Completion prefix.
         wake.wake().map_err(io::Error::other)?;
@@ -872,7 +876,11 @@ fn source_session_finish_keeps_the_original_timer_and_lua_state_after_interrupti
         };
         assert_eq!(result??, completion(71, expected));
         assert_eq!(
-            channel.lua_vm().map_err(channel_error)?.scheduled_timer(),
+            channel
+                .lua_vm()
+                .map_err(channel_error)?
+                .next_timer_event()
+                .map(|timer| timer.schedule),
             original_timer
         );
         assert_eq!(
@@ -886,7 +894,8 @@ fn source_session_finish_keeps_the_original_timer_and_lua_state_after_interrupti
             channel
                 .lua_vm()
                 .map_err(channel_error)?
-                .scheduled_timer()
+                .next_timer_event()
+                .map(|timer| timer.schedule)
                 .is_none()
         );
         assert!(source.try_completion()?.is_none());
@@ -1006,7 +1015,7 @@ fn ready_source_runs_before_a_future_timer() -> io::Result<()> {
             if event.type == "timer" then
                 error("Future timer ran early")
             end
-            clearTimerTask()
+            clearTimeout()
             emit()
         end
         "#,
@@ -1019,6 +1028,157 @@ fn ready_source_runs_before_a_future_timer() -> io::Result<()> {
         source.wait_completion()?,
         completion(52, IngressCompletionStatus::Ok)
     );
+    channel.stop()
+}
+
+#[test]
+fn timer_source_ties_and_vm_transitions_preserve_event_order() -> io::Result<()> {
+    let mut source = SourceQueueFixture::new()?;
+    source.submit(53, source_payload("ready")?)?;
+    let (diagnostics, _records) = interested_channel(0);
+    let spec = channel_spec(
+        "setTimeout(0); setTimeout(0); function main(event) end",
+        SourceDelivery::AtLeastOnce,
+        [],
+    )?;
+    let (mut channel, _wake, commands) = open_channel(
+        source.queue_paths(),
+        source.bells()?,
+        Instant::now(),
+        spec,
+        diagnostics,
+        HashMap::new(),
+        Arc::new(FlowChannelControl::new()),
+        || false,
+    )
+    .map_err(channel_error)?;
+    let timer = channel
+        .lua_vm()
+        .map_err(channel_error)?
+        .next_timer_event()
+        .ok_or_else(|| io::Error::other("timer missing"))?;
+    for (order, expected) in [
+        (timer.sequence - 1, super::ChannelWork::SourceRecord),
+        (timer.sequence + 1, super::ChannelWork::TimerDue),
+    ] {
+        channel.source_readiness.set(Some(super::SourceReadiness {
+            observed_at: timer.deadline,
+            order,
+            generation: channel.vm_generation.get(),
+        }));
+        assert_eq!(
+            channel.pending_work().map_err(channel_error)?,
+            Some(expected)
+        );
+    }
+    channel.reload_lua_vm().map_err(channel_error)?;
+    assert!(channel.source_readiness.get().is_none());
+    let replacement = channel
+        .lua_vm()
+        .map_err(channel_error)?
+        .next_timer_event()
+        .ok_or_else(|| io::Error::other("replacement timer missing"))?;
+    assert!(replacement.sequence > timer.sequence);
+    assert_eq!(
+        channel.pending_work().map_err(channel_error)?,
+        Some(super::ChannelWork::TimerDue)
+    );
+    let old_readiness = channel.source_readiness.get();
+    assert!(old_readiness.is_some());
+    let (events, observations) = mpsc::sync_channel(8);
+    let ticket = commands
+        .begin_replacement(
+            0,
+            ChannelDefinitionChange::Replace(channel.spec.clone()),
+            HashMap::new(),
+            events,
+        )
+        .map_err(io::Error::other)?;
+    let Some(super::ChannelCommand::Replace(request)) = channel.commands.try_take() else {
+        return Err(io::Error::other("replacement request missing"));
+    };
+    channel
+        .prepare_replacement(request)
+        .map_err(channel_error)?;
+    assert!(matches!(
+        observations
+            .recv_timeout(WAIT_LIMIT)
+            .map_err(io::Error::other)?,
+        FlowChannelReplacementEvent::Prepared { .. }
+    ));
+    assert_eq!(channel.source_readiness.get(), old_readiness);
+    ticket.cutover().map_err(io::Error::other)?;
+    thread::scope(|scope| -> io::Result<()> {
+        let activation = scope.spawn(move || -> io::Result<()> {
+            assert!(matches!(
+                observations
+                    .recv_timeout(WAIT_LIMIT)
+                    .map_err(io::Error::other)?,
+                FlowChannelReplacementEvent::CutoverComplete { .. }
+            ));
+            ticket.activate().map_err(io::Error::other)
+        });
+        channel.advance_replacement().map_err(channel_error)?;
+        activation
+            .join()
+            .map_err(|_| io::Error::other("activation thread panicked"))??;
+        Ok(())
+    })?;
+    assert!(channel.source_readiness.get().is_none());
+    assert_eq!(
+        channel.pending_work().map_err(channel_error)?,
+        Some(super::ChannelWork::TimerDue)
+    );
+    assert!(channel.source_readiness.get().is_some());
+    channel.control.request_drain();
+    assert_eq!(
+        channel.drain_source_records().map_err(channel_error)?,
+        super::CompletionProgress::Completed
+    );
+    assert!(channel.source_readiness.get().is_none());
+    assert_eq!(
+        source.wait_completion()?,
+        completion(53, IngressCompletionStatus::Retry)
+    );
+    Ok(())
+}
+
+#[test]
+fn recurring_zero_delay_timer_yields_to_continuously_ready_source() -> io::Result<()> {
+    let mut source = SourceQueueFixture::new()?;
+    for record_id in 53..=55 {
+        source.submit(record_id, source_payload("ready")?)?;
+    }
+    let spec = channel_spec(
+        r#"
+        local sourceCount = 0
+        setTimeout(0)
+
+        function main(event)
+            if event.type == "timer" then
+                if sourceCount < 3 then
+                    setTimeout(0)
+                end
+                return
+            end
+            sourceCount = sourceCount + 1
+            emit()
+            if sourceCount >= 3 then
+                clearTimeout()
+            end
+        end
+        "#,
+        SourceDelivery::AtLeastOnce,
+        [],
+    )?;
+    let channel = RunningChannel::start(&source, spec, HashMap::new())?;
+
+    for record_id in 53..=55 {
+        assert_eq!(
+            source.wait_completion()?,
+            completion(record_id, IngressCompletionStatus::Ok)
+        );
+    }
     channel.stop()
 }
 

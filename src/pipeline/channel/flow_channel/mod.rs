@@ -69,7 +69,9 @@
 //! every Channel has installed the same replacement.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::fmt;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -141,6 +143,13 @@ enum ChannelWork {
     SourceRecord,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceReadiness {
+    observed_at: Instant,
+    order: u64,
+    generation: u64,
+}
+
 /// Thread-affine Lua and Source resources prepared before the old writer handoff.
 pub(crate) struct PreparedFlowChannel {
     ingress: IngressQueuePair,
@@ -155,6 +164,7 @@ pub(crate) struct PreparedFlowChannel {
     bell: Arc<LoopBell>,
     control: Arc<FlowChannelControl>,
     commands: ChannelCommandInbox,
+    event_order: Rc<Cell<u64>>,
 }
 
 impl PreparedFlowChannel {
@@ -183,6 +193,9 @@ impl PreparedFlowChannel {
             control: self.control,
             commands: self.commands,
             candidate: None,
+            source_readiness: Cell::new(None),
+            next_event_order: self.event_order,
+            vm_generation: Cell::new(0),
         };
         channel.metrics.bind();
         channel.bind_route_generation();
@@ -207,6 +220,9 @@ pub(crate) struct FlowChannel {
     control: Arc<FlowChannelControl>,
     commands: ChannelCommandInbox,
     candidate: Option<PreparedChannelDefinition>,
+    source_readiness: Cell<Option<SourceReadiness>>,
+    next_event_order: Rc<Cell<u64>>,
+    vm_generation: Cell<u64>,
 }
 
 impl FlowChannel {
@@ -240,11 +256,16 @@ impl FlowChannel {
         let ingress =
             IngressQueuePair::open(submission_path, completion_path, &bell, &source_region)?;
         let (commands, command_control) = control_pair(bell.interrupter());
+        let event_order = Rc::new(Cell::new(0));
         let execution_control = Arc::clone(&control);
         let (lua_vm, lua_vm_diagnostics) = spec
-            .load_vm(diagnostics.clone(), &metrics, move || {
-                startup_aborted() || execution_control.is_stopping()
-            })
+            .load_vm(
+                diagnostics.clone(),
+                &metrics,
+                move || startup_aborted() || execution_control.is_stopping(),
+                pipeline_started_at,
+                Rc::clone(&event_order),
+            )
             .map_err(|source| FlowChannelError::LuaVmLoad {
                 kind: source.kind(),
             })?;
@@ -263,6 +284,7 @@ impl FlowChannel {
                 bell,
                 control,
                 commands,
+                event_order,
             },
             wake,
             command_control,
@@ -338,9 +360,9 @@ impl FlowChannel {
     /// dispatch set by construction: a new fact must be added here, and its
     /// `match` arm in [`Self::run_events`] then cannot be omitted.
     ///
-    /// A due Lua timer outranks a ready Source record, because a Source event
-    /// must observe the script state the timer already produced. A timer that is
-    /// still waiting is not work here: its exact remaining duration becomes the
+    /// A due Lua timer and a ready Source record are ordered by their eligible
+    /// time and the Channel-local sequence tie-breaker. A timer that is still
+    /// waiting is not work here: its exact remaining duration becomes the
     /// park's only timeout instead.
     fn pending_work(&self) -> Result<Option<ChannelWork>, FlowChannelError> {
         match self.control.directive() {
@@ -359,25 +381,74 @@ impl FlowChannel {
         if self.commands.has_pending() {
             return Ok(Some(ChannelWork::Command));
         }
-        if matches!(self.timer_readiness()?, Some(TimerReadiness::Due)) {
-            return Ok(Some(ChannelWork::TimerDue));
-        }
-        if self
+        let timer = self.lua_vm()?.next_timer_event();
+        let source_ready = self
             .ingress
             .readable()
-            .map_err(|source| FlowChannelError::ChannelWait { source })?
-        {
+            .map_err(|source| FlowChannelError::ChannelWait { source })?;
+        if source_ready {
+            self.observe_source_readiness()?;
+        } else {
+            self.source_readiness.set(None);
+        }
+        let timer_due = timer.as_ref().is_some_and(|timer| {
+            timer_readiness_at(timer.schedule, Instant::now()) == TimerReadiness::Due
+        });
+        if timer_due && source_ready {
+            let source = self
+                .source_readiness
+                .get()
+                .ok_or(FlowChannelError::InternalInvariantViolation)?;
+            let timer = timer.ok_or(FlowChannelError::InternalInvariantViolation)?;
+            let timer_first = timer.deadline < source.observed_at
+                || (timer.deadline == source.observed_at && timer.sequence <= source.order);
+            return Ok(Some(if timer_first {
+                ChannelWork::TimerDue
+            } else {
+                ChannelWork::SourceRecord
+            }));
+        }
+        if timer_due {
+            return Ok(Some(ChannelWork::TimerDue));
+        }
+        if source_ready {
             return Ok(Some(ChannelWork::SourceRecord));
         }
         Ok(None)
     }
 
-    /// Reports the Lua timer's readiness from the current instant.
+    fn observe_source_readiness(&self) -> Result<(), FlowChannelError> {
+        let generation = self.vm_generation.get();
+        if self
+            .source_readiness
+            .get()
+            .is_some_and(|readiness| readiness.generation == generation)
+        {
+            return Ok(());
+        }
+        let order = self
+            .next_event_order()
+            .ok_or(FlowChannelError::InternalInvariantViolation)?;
+        self.source_readiness.set(Some(SourceReadiness {
+            observed_at: Instant::now(),
+            order,
+            generation,
+        }));
+        Ok(())
+    }
+
+    fn next_event_order(&self) -> Option<u64> {
+        let next = self.next_event_order.get().checked_add(1)?;
+        self.next_event_order.set(next);
+        Some(next)
+    }
+
+    /// Reports the earliest Lua timer's readiness from the current instant.
     fn timer_readiness(&self) -> Result<Option<TimerReadiness>, FlowChannelError> {
         Ok(self
             .lua_vm()?
-            .scheduled_timer()
-            .map(|timer| timer_readiness_at(timer, Instant::now())))
+            .next_timer_event()
+            .map(|timer| timer_readiness_at(timer.schedule, Instant::now())))
     }
 
     /// Processes at most one already committed Source record without waiting.
@@ -392,9 +463,12 @@ impl FlowChannel {
     /// resource, or private invariant failure.
     fn process_available_source(&mut self) -> Result<Option<FlowChannelStep>, FlowChannelError> {
         let Some(record) = self.ingress.try_receive(&self.metrics)? else {
+            self.source_readiness.set(None);
             return Ok(None);
         };
-        self.process_source_record(record).map(Some)
+        let result = self.process_source_record(record);
+        self.source_readiness.set(None);
+        result.map(Some)
     }
 
     fn prepare_replacement(
@@ -414,16 +488,19 @@ impl FlowChannel {
                     "a replacement uses one complete target registry"
                 );
                 let replacement_control = Arc::clone(&self.control);
-                let (vm, vm_diagnostics) =
-                    match spec.load_vm(self.diagnostics.clone(), &self.metrics, move || {
-                        replacement_control.is_stopping()
-                    }) {
-                        Ok(prepared) => prepared,
-                        Err(source) => {
-                            drop(routes);
-                            return session.candidate_failed(source.kind());
-                        }
-                    };
+                let (vm, vm_diagnostics) = match spec.load_vm(
+                    self.diagnostics.clone(),
+                    &self.metrics,
+                    move || replacement_control.is_stopping(),
+                    self.pipeline_started_at,
+                    Rc::clone(&self.next_event_order),
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(source) => {
+                        drop(routes);
+                        return session.candidate_failed(source.kind());
+                    }
+                };
                 PreparedDefinition::Replacement {
                     spec,
                     vm,
@@ -495,6 +572,7 @@ impl FlowChannel {
             self.spec = spec;
             self.lua_vm = Some(vm);
             self.lua_vm_diagnostics = Some(vm_diagnostics);
+            self.reset_event_observations();
         }
         self.routes = bind_routes(
             routes,
@@ -525,6 +603,7 @@ impl FlowChannel {
     }
 
     fn drain_source_records(&mut self) -> Result<CompletionProgress, FlowChannelError> {
+        self.source_readiness.set(None);
         loop {
             if self.is_stopping() {
                 return Ok(CompletionProgress::Stopped);
@@ -954,30 +1033,38 @@ impl FlowChannel {
     }
 
     fn reload_lua_vm(&mut self) -> Result<LuaReloadProgress, FlowChannelError> {
+        self.reset_event_observations();
         drop(self.lua_vm.take());
         drop(self.lua_vm_diagnostics.take());
         let reload_control = Arc::clone(&self.control);
-        let (lua_vm, lua_vm_diagnostics) =
-            match self
-                .spec
-                .load_vm(self.diagnostics.clone(), &self.metrics, move || {
-                    reload_control.is_stopping()
-                }) {
-                Ok(prepared) => prepared,
-                Err(source)
-                    if self.is_stopping() && source.kind() == LuaVmErrorKind::ExecutionStopped =>
-                {
-                    return Ok(LuaReloadProgress::Stopped);
-                }
-                Err(source) => {
-                    return Err(FlowChannelError::LuaVmLoad {
-                        kind: source.kind(),
-                    });
-                }
-            };
+        let (lua_vm, lua_vm_diagnostics) = match self.spec.load_vm(
+            self.diagnostics.clone(),
+            &self.metrics,
+            move || reload_control.is_stopping(),
+            self.pipeline_started_at,
+            Rc::clone(&self.next_event_order),
+        ) {
+            Ok(prepared) => prepared,
+            Err(source)
+                if self.is_stopping() && source.kind() == LuaVmErrorKind::ExecutionStopped =>
+            {
+                return Ok(LuaReloadProgress::Stopped);
+            }
+            Err(source) => {
+                return Err(FlowChannelError::LuaVmLoad {
+                    kind: source.kind(),
+                });
+            }
+        };
         self.lua_vm = Some(lua_vm);
         self.lua_vm_diagnostics = Some(lua_vm_diagnostics);
         Ok(LuaReloadProgress::Reloaded)
+    }
+
+    fn reset_event_observations(&self) {
+        self.source_readiness.set(None);
+        self.vm_generation
+            .set(self.vm_generation.get().wrapping_add(1));
     }
 
     fn lua_vm_mut(&mut self) -> Result<&mut LuaVm, FlowChannelError> {
@@ -1006,11 +1093,12 @@ impl FlowChannel {
                 return Ok(FlowChannelStep::Stopped);
             }
         }
-        self.lua_vm_mut()?
+        let timer = self
+            .lua_vm_mut()?
             .begin_timer()
             .map_err(|_| FlowChannelError::InternalInvariantViolation)?;
         let timestamp = self.timestamp_millis()?;
-        let outcome = self.lua_vm_mut()?.call_timer(timestamp);
+        let outcome = self.lua_vm_mut()?.call_timer_event(timestamp, timer);
         self.finish_lua_outcome(outcome, LuaFailureCompletion::Timer)
     }
 

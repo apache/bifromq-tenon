@@ -52,6 +52,31 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+// General VM tests inject an anonymous timer event without scheduling a task.
+// Timer lifecycle tests pass the event returned by begin_timer instead.
+impl LuaVm {
+    fn call_timer(&mut self, timestamp_millis: i64) -> LuaMainOutcome {
+        let now = Instant::now();
+        self.call_timer_event(
+            timestamp_millis,
+            super::TimerEvent {
+                schedule: super::TimerSchedule {
+                    scheduled_at: now,
+                    delay: Duration::ZERO,
+                },
+                deadline: now,
+                eligible_at: timestamp_millis,
+                id: None,
+                sequence: 0,
+            },
+        )
+    }
+
+    fn scheduled_timer(&self) -> Option<super::TimerSchedule> {
+        self.next_timer_event().map(|timer| timer.schedule)
+    }
+}
+
 const TEST_MEMORY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const TEST_CPU_TIME_LIMIT: Duration = Duration::from_millis(100);
 
@@ -101,12 +126,12 @@ impl LuaMainOutcomeTestExt for LuaMainOutcome {
     }
 }
 
-fn limits() -> io::Result<ScriptVmLimits> {
+pub(super) fn limits() -> io::Result<ScriptVmLimits> {
     ScriptVmLimits::try_new(non_zero(TEST_MEMORY_LIMIT_BYTES)?, TEST_CPU_TIME_LIMIT)
         .map_err(io::Error::other)
 }
 
-fn load_vm(source: &str, limits: ScriptVmLimits) -> Result<LuaVm, LuaVmError> {
+pub(super) fn load_vm(source: &str, limits: ScriptVmLimits) -> Result<LuaVm, LuaVmError> {
     load_vm_with_contracts(source, limits, HashMap::new())
 }
 
@@ -2049,7 +2074,8 @@ fn exposes_only_the_fixed_library_allowlist() -> io::Result<()> {
         assert(type(utf8.codepoint) == "function")
         assert(type(print) == "function")
         assert(type(setTimeout) == "function")
-        assert(type(clearTimerTask) == "function")
+        assert(type(clearTimeout) == "function")
+        assert(clearTimerTask == nil)
         assert(type(hasTimeout) == "function")
         assert(type(currentTimeMillis) == "function")
         assert(type(os.date) == "function")
@@ -2567,7 +2593,7 @@ fn top_level_zero_timeout_waits_for_the_next_event_loop_turn() -> io::Result<()>
         assert(not hasTimeout())
         setTimeout(25)
         assert(hasTimeout())
-        clearTimerTask()
+        clearTimeout()
         assert(not hasTimeout())
         setTimeout(0)
         assert(hasTimeout())
@@ -2597,11 +2623,13 @@ fn top_level_zero_timeout_waits_for_the_next_event_loop_turn() -> io::Result<()>
     assert!(lua_has_timeout(&vm).map_err(test_error)?);
     assert_eq!(vm.scheduled_timer(), Some(schedule));
 
-    assert!(vm.begin_timer().is_ok());
+    let event = vm
+        .begin_timer()
+        .map_err(|_| io::Error::other("timer missing"))?;
     assert!(!lua_has_timeout(&vm).map_err(test_error)?);
     assert!(vm.scheduled_timer().is_none());
     assert!(vm.begin_timer().is_err());
-    vm.call_timer(1)
+    vm.call_timer_event(1, event)
         .into_result_without_emit_boundaries()
         .map_err(test_error)?;
     assert_eq!(
@@ -2647,7 +2675,7 @@ fn every_new_vm_schedules_its_own_top_level_timeout() -> io::Result<()> {
 fn timer_apis_share_one_slot_in_top_level_and_source_main() -> io::Result<()> {
     let mut vm = load_vm(
         r#"
-        clearTimerTask()
+        clearTimeout()
 
         function main(event)
             if event.timestamp == 1 then
@@ -2658,7 +2686,7 @@ fn timer_apis_share_one_slot_in_top_level_and_source_main() -> io::Result<()> {
                 assert(hasTimeout())
             elseif event.timestamp == 2 then
                 assert(hasTimeout())
-                clearTimerTask()
+                clearTimeout()
                 assert(not hasTimeout())
             end
         end
@@ -2738,7 +2766,11 @@ fn set_timeout_accepts_all_non_negative_lua_integers() -> io::Result<()> {
 
         setTimeout(0)
         assert(hasTimeout())
-        setTimeout(9223372036854775807)
+        local max_ok, max_reason = pcall(setTimeout, 9223372036854775807)
+        if not max_ok then
+            assert(max_reason == "setTimeout delay is out of range")
+            setTimeout(0)
+        end
         assert(hasTimeout())
 
         function main(event)
@@ -2751,9 +2783,240 @@ fn set_timeout_accepts_all_non_negative_lua_integers() -> io::Result<()> {
     let Some(schedule) = vm.scheduled_timer() else {
         return Err(io::Error::other("maximum timeout schedule is missing"));
     };
+    assert!(
+        schedule.delay == Duration::ZERO
+            || schedule.delay == Duration::from_millis(i64::MAX.unsigned_abs())
+    );
+    Ok(())
+}
+
+#[test]
+fn named_timers_replace_clear_and_expose_their_id() -> io::Result<()> {
+    let mut vm = load_vm(
+        r#"
+        setTimeout(20, "flush")
+        setTimeout(10, "heartbeat")
+        assert(hasTimeout("flush"))
+        assert(hasTimeout("heartbeat"))
+        clearTimeout("flush")
+        assert(not hasTimeout("flush"))
+        function main(event)
+            assert(event.type == "timer")
+            assert(event.id == "heartbeat")
+            assert(event.eligibleAt >= 10)
+            assert(not hasTimeout("heartbeat"))
+        end
+        "#,
+        limits()?,
+    )
+    .map_err(test_error)?;
+    let event = vm
+        .begin_timer()
+        .map_err(|_| io::Error::other("timer missing"))?;
+    vm.call_timer_event(10, event)
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)
+}
+
+#[test]
+fn zero_delay_timers_are_dispatched_in_registration_order() -> io::Result<()> {
+    let mut vm = load_vm(
+        r#"
+        setTimeout(0, "first")
+        setTimeout(0, "second")
+        setTimeout(0)
+        function main(event)
+            assert(event.type == "timer")
+        end
+        "#,
+        limits()?,
+    )
+    .map_err(test_error)?;
+    let first = vm
+        .begin_timer()
+        .map_err(|_| io::Error::other("first timer missing"))?;
+    assert_eq!(first.id.as_deref(), Some("first"));
+    vm.call_timer_event(0, first)
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    let second = vm
+        .begin_timer()
+        .map_err(|_| io::Error::other("second timer missing"))?;
+    assert_eq!(second.id.as_deref(), Some("second"));
+    vm.call_timer_event(0, second)
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    let anonymous = vm
+        .begin_timer()
+        .map_err(|_| io::Error::other("anonymous timer missing"))?;
+    assert_eq!(anonymous.id, None);
+    Ok(())
+}
+
+#[test]
+fn named_timer_ids_are_validated_without_changing_existing_timers() -> io::Result<()> {
+    load_vm(
+        r#"
+        local valid = string.rep("é", 64)
+        setTimeout(0, valid)
+        setTimeout(0)
+        for _, id in ipairs({"", true, 1, string.rep("é", 65), string.char(255)}) do
+            for _, call in ipairs({
+                function() setTimeout(0, id) end,
+                function() clearTimeout(id) end,
+                function() hasTimeout(id) end
+            }) do
+                local ok, reason = pcall(call)
+                assert(not ok)
+                assert(reason == "timer id must be a non-empty string of at most 128 bytes")
+            end
+        end
+        assert(hasTimeout(valid))
+        assert(hasTimeout(nil))
+        clearTimeout(valid)
+        assert(not hasTimeout(valid))
+        assert(hasTimeout())
+        assert(select('#', clearTimeout(nil)) == 0)
+        assert(select('#', clearTimeout("missing")) == 0)
+        assert(not hasTimeout())
+        function main(event) end
+        "#,
+        limits()?,
+    )
+    .map_err(test_error)?;
+    Ok(())
+}
+
+#[test]
+fn timer_memory_charge_is_fixed_per_pending_timer_plus_utf8_id_bytes() -> io::Result<()> {
+    let mut vm = load_vm(
+        r#"
+        setTimeout(0, "é")
+        function main(event)
+            setTimeout(0)
+            setTimeout(0, "é")
+        end
+        "#,
+        limits()?,
+    )
+    .map_err(test_error)?;
+    let budget = Rc::clone(&vm.native_memory_budget);
+    // The public charge is 2 KiB per timer plus three copies of its UTF-8 id.
+    assert_eq!(budget.used_bytes(), 2048 + 3 * 2);
+    call_source(&mut vm, 1, empty_source_payload())?
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    assert_eq!(budget.used_bytes(), 2 * 2048 + 3 * 2);
+    let anonymous = vm
+        .begin_timer()
+        .map_err(|_| io::Error::other("anonymous timer missing"))?;
+    assert_eq!(anonymous.id, None);
+    assert_eq!(budget.used_bytes(), 2048 + 3 * 2);
+    let named = vm
+        .begin_timer()
+        .map_err(|_| io::Error::other("named timer missing"))?;
+    assert_eq!(named.id.as_deref(), Some("é"));
+    assert_eq!(budget.used_bytes(), 0);
+    Ok(())
+}
+
+#[test]
+fn timer_memory_is_reused_on_replace_and_released_on_clear_dispatch_and_drop() -> io::Result<()> {
+    let mut vm = load_vm(
+        r#"
+        function main(event)
+            for i = 1, 128 do setTimeout(0, tostring(i)) end
+            if event.timestamp == 2 then
+                for i = 1, 128 do clearTimeout(tostring(i)) end
+            end
+        end
+        "#,
+        limits()?,
+    )
+    .map_err(test_error)?;
+    let budget = Rc::clone(&vm.native_memory_budget);
+    assert_eq!(budget.used_bytes(), 0);
+    call_source(&mut vm, 1, empty_source_payload())?
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    let allocated = budget.used_bytes();
+    assert!(allocated > 0);
+    call_source(&mut vm, 1, empty_source_payload())?
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    assert_eq!(budget.used_bytes(), allocated);
+    call_source(&mut vm, 2, empty_source_payload())?
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    assert_eq!(budget.used_bytes(), 0);
+    call_source(&mut vm, 1, empty_source_payload())?
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    for _ in 0..128 {
+        vm.begin_timer()
+            .map_err(|_| io::Error::other("timer missing"))?;
+    }
+    assert_eq!(budget.used_bytes(), 0);
+    call_source(&mut vm, 1, empty_source_payload())?
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    drop(vm);
+    assert_eq!(budget.used_bytes(), 0);
+    Ok(())
+}
+
+#[test]
+fn timer_memory_exhaustion_escapes_protected_calls() -> io::Result<()> {
+    let mut vm = load_vm(
+        r#"
+        function main(event)
+            pcall(function()
+                for i = 1, 100000 do setTimeout(0, tostring(i)) end
+            end)
+            error("memory failure was swallowed")
+        end
+        "#,
+        limits()?,
+    )
+    .map_err(test_error)?;
+    let Err(error) =
+        call_source(&mut vm, 1, empty_source_payload())?.into_result_without_emit_boundaries()
+    else {
+        return Err(io::Error::other("timer budget must be enforced"));
+    };
+    assert_eq!(error.kind(), LuaVmErrorKind::MemoryExceeded);
+    assert!(vm.next_timer_event().is_none());
+    Ok(())
+}
+
+#[test]
+fn timer_delay_max_integer_rejects_overflow_and_preserves_the_old_timer() -> io::Result<()> {
+    let origin = Instant::now()
+        .checked_sub(Duration::from_millis(2))
+        .ok_or_else(|| io::Error::other("test origin out of range"))?;
+    let vm = LuaVm::load_observed_at(
+        r#"
+        setTimeout(7)
+        local ok, message = pcall(setTimeout, 9223372036854775807)
+        assert(not ok)
+        assert(message == "setTimeout delay is out of range")
+        assert(hasTimeout())
+        function main(event) end
+        "#,
+        limits()?,
+        NonZeroU64::new(262_144).ok_or_else(|| io::Error::other("record limit"))?,
+        lua_source_contract()?,
+        HashMap::new(),
+        None,
+        || false,
+        None,
+        origin,
+        Rc::new(std::cell::Cell::new(0)),
+    )
+    .map_err(test_error)?;
     assert_eq!(
-        schedule.delay,
-        Duration::from_millis(i64::MAX.unsigned_abs())
+        vm.scheduled_timer().map(|timer| timer.delay),
+        Some(Duration::from_millis(7))
     );
     Ok(())
 }
@@ -2798,8 +3061,13 @@ fn failed_main_does_not_expose_its_timer_schedule() -> io::Result<()> {
     let Some(_schedule) = vm.scheduled_timer() else {
         return Err(io::Error::other("startup timeout schedule is missing"));
     };
-    assert!(vm.begin_timer().is_ok());
-    let Err(error) = vm.call_timer(1).into_result_without_emit_boundaries() else {
+    let event = vm
+        .begin_timer()
+        .map_err(|_| io::Error::other("timer missing"))?;
+    let Err(error) = vm
+        .call_timer_event(1, event)
+        .into_result_without_emit_boundaries()
+    else {
         return Err(io::Error::other("failing main should be rejected"));
     };
     assert_eq!(error.kind(), LuaVmErrorKind::MainFailed);
@@ -2813,7 +3081,7 @@ fn protects_predefined_globals_and_libraries() -> io::Result<()> {
         "_VERSION = \"changed\"; function main(event) end",
         "_G._VERSION = \"changed\"; function main(event) end",
         "setTimeout = nil; function main(event) end",
-        "clearTimerTask = nil; function main(event) end",
+        "clearTimeout = nil; function main(event) end",
         "hasTimeout = nil; function main(event) end",
         "currentTimeMillis = nil; function main(event) end",
         "os = {}; function main(event) end",
@@ -4063,9 +4331,11 @@ fn main_receives_exactly_one_timer_event_argument() -> io::Result<()> {
             for _ in pairs(event) do
                 count = count + 1
             end
-            assert(count == 2)
+            assert(count == 3)
             assert(event.type == "timer")
             assert(event.timestamp == 27)
+            assert(event.id == nil)
+            assert(event.eligibleAt == 27)
             assert(event.payload == nil)
         end
         "##,
