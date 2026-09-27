@@ -47,7 +47,7 @@ cargo tenon bundle --locked \
 
 These are native debug builds. Use `--release` for distribution and build a bundle for each intended platform. See [distribution guidance](../guide/plugins.md#build-artifacts-for-distribution).
 
-Start a local Runner using the [quickstart configuration](../guide/quickstart.md#configure-and-start), or use your existing development Runner. The following examples assume `http://127.0.0.1:18080`; supply your deployment's authentication headers when required.
+Start a local Runner with the [quickstart script](../guide/quickstart.md#run-the-complete-example), or use your existing development Runner. The following examples assume `http://127.0.0.1:18080`; supply your deployment's authentication headers when required.
 
 ```sh
 for report in /tmp/tenon-dummy-bundle.json /tmp/tenon-stdout-bundle.json; do

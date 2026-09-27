@@ -21,91 +21,62 @@ under the License.
 
 Tenon is part of Apache BifroMQ (Incubating). See the [incubation disclaimer](../DISCLAIMER).
 
-This example builds from a source checkout. A generated dual-interface plugin sends one text record through Lua and writes it to a file, so no broker or published Tenon package is needed. Run on a supported native platform with the [build prerequisites](../README.md#build-and-try), Python 3 and curl. Use a free local port; the example uses 18080.
+This example builds from a source checkout and runs two independent Pipelines in one Runner. One Pipeline uses a generated source-and-sink plugin and writes a record to a file. The other uses the built-in Dummy Source and Stdout Sink, with a Lua timer producing output. This shows both the plugin scaffold path and prebuilt repository plugins; no broker or published Tenon package is needed. Run on a supported native platform with the [build prerequisites](../README.md#build-and-try), Python 3 and curl. The script uses local port 18080; set `TENON_PORT` to choose another port.
 
-## Build the Runner and tools
+## Run the complete example
 
 From the Tenon source root:
 
 ```sh
-tenon_root="$PWD"
+tools/example/local.sh
+```
+
+The script builds the Runner, generates and bundles the scaffold plugin, bundles the two built-in plugins, starts Tenon, installs all three Programs, saves two Documents, and checks both Pipelines. It installs `cargo-generate` 0.24.0 if the Cargo subcommand is missing. This provides the `cargo generate` command; installing the Rust toolchain alone does not install it. The script adds Cargo's binary directory to `PATH` so Cargo can find the generator.
+
+It writes the generated project, the three bundles, `runner.jsonc`, and two input Documents in a temporary directory. `runner.jsonc` tells Tenon where to keep local state and to listen on `127.0.0.1`. `hello.jsonc` defines one Instance of the generated source-and-sink Program and one Flow that binds it as both Source and Sink; Lua copies the Source message into its Sink payload. `builtins.jsonc` defines a second Pipeline with one Flow from Dummy Source to Stdout Sink; Lua's timer emits a message every second. Both Flows omit `parallelism`, so each uses one channel. The script polls `/pipelines/hello` and `/pipelines/builtins`; the JSON files it saves from those GET responses are status snapshots, not the Documents submitted to Tenon. It checks `output.txt` for the scaffold Pipeline and subscribes to the built-in Pipeline's diagnostic stream to confirm stdout output.
+
+When the example succeeds, the script prints both outputs and follows the Runner log. Press Ctrl-C to stop the Runner. It leaves its temporary directory in place and prints its path so you can inspect the generated project, Documents, status snapshots, bundles, logs and output. The Runner listens only on localhost. No Document cleanup is needed because stopping the temporary Runner ends this example.
+
+If port 18080 is already in use, choose another port:
+
+```sh
+TENON_PORT=18081 tools/example/local.sh
+```
+
+## Manual steps
+
+To run each stage yourself, first build the Runner and install the two Cargo tools:
+
+```sh
 cargo build --locked --bin tenon
 cargo install cargo-generate --version 0.24.0 --locked
 cargo install --path sdk/rust/cargo-tenon --locked
-demo_root="$(mktemp -d "${TMPDIR:-/tmp}/tenon-quickstart.XXXXXX")"
-cd "$demo_root"
-cargo generate --path "$tenon_root/sdk/rust/rust-plugin-scaffold" \
-  --name hello-tenon --define interface=source-and-sink \
-  --silent --vcs none --no-workspace
-cd hello-tenon
-cargo tenon bundle \
-  --config "patch.crates-io.tenon-plugin-sdk.path=\"$tenon_root/sdk/rust/plugin-sdk\"" \
-  --config "patch.crates-io.tenon-ipc.path=\"$tenon_root/sdk/rust/ipc\"" \
-  > "$demo_root/bundle.json"
-bundle="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$demo_root/bundle.json")"
 ```
 
-The local Cargo patches select the SDK and IPC code in this checkout. The bundle command reports the actual bundle path in JSON. Keep this shell open so the variables remain available.
+`cargo generate` is provided by `cargo-generate`. The install command adds that executable to Cargo's bin directory. Then follow the script's steps: generate the scaffold, bundle it against the local SDK, bundle the two built-in plugins, write `runner.jsonc`, `hello.jsonc` and `builtins.jsonc`, start the Runner, install the three Programs, and PUT both Documents. The script at [tools/example/local.sh](../tools/example/local.sh) contains the exact commands and example JSON.
 
-## Configure and start
-
-```sh
-python3 - "$demo_root" <<'PYTHON'
-import json, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-(root / "runner.jsonc").write_text(json.dumps({
-    "stateDirectory": str(root / "state"),
-    "http": {"listenAddress": "127.0.0.1:18080"},
-    "pipeline": {"retryBackoff": {"initialDelayMs": 100, "maximumDelayMs": 30000}},
-    "lua": {"cpuTimeLimitMs": 50, "memoryLimitBytes": 16777216}
-}))
-(root / "hello.jsonc").write_text(json.dumps({
-    "specVersion": "1", "id": "hello",
-    "pluginInstances": {"example": {
-        "programName": "com.example.hello-tenon", "exactVersion": "0.1.0",
-        "config": {"message": "Hello Tenon", "outputFile": str(root / "output.txt")}
-    }},
-    "flows": {"main": {
-        "source": "example", "sinks": ["example"],
-        "process": {"script": 'local b = registry:getBuilder("com.example.hello-tenon@0.1.0")\nfunction main(event)\n b:setMessage(event.payload.message)\n emit(b:build())\nend'}
-    }}
-}))
-PYTHON
-"$tenon_root/target/debug/tenon" --config "$demo_root/runner.jsonc" \
-  > "$demo_root/runner.log" 2>&1 &
-runner_pid=$!
-```
-
-Wait until this request succeeds; if the process exits, inspect `runner.log`:
-
-```sh
-curl --fail http://127.0.0.1:18080/openapi.json > "$demo_root/openapi.json"
-```
-
-## Install and run
+Once the Runner is running, the essential API calls are:
 
 ```sh
 curl --fail -i -X POST http://127.0.0.1:18080/plugins \
   -H 'Content-Type: application/vnd.apache.tenon.plugin+tar+gzip' \
-  --data-binary "@$bundle"
+  --data-binary @/absolute/path/to/hello-tenon.tar.gz
 curl --fail -i -X PUT http://127.0.0.1:18080/documents/hello \
   -H 'Content-Type: application/jsonc' -H 'If-None-Match: *' \
-  --data-binary "@$demo_root/hello.jsonc"
+  --data-binary @/absolute/path/to/hello.jsonc
 curl --fail http://127.0.0.1:18080/pipelines/hello
-cat "$demo_root/output.txt"
+cat /absolute/path/to/output.txt
 ```
 
 Installation and creation return 201. Application is asynchronous: repeat the status read until `state` is `running`, `appliedDocumentEtag` equals `documentEtag`, and the plugin is running. The output file must contain `Hello Tenon`. Wait until the file appears and contains that line. Each fresh plugin process emits the example message, so a restart can append another line.
 
-## Stop and clean up
+The Document PUT response confirms it was saved, not that the Pipeline has applied it. Poll `GET /pipelines/hello` until the state is `running`, `appliedDocumentEtag` matches `documentEtag`, and the plugin instance is running. Then check the output file. Replace the example absolute paths above with the paths where you generated those files.
+
+To stop a manually started Runner, send it SIGTERM and wait for it to exit:
 
 ```sh
-etag="$(curl --fail -sS -D - -o /dev/null http://127.0.0.1:18080/documents/hello \
-  | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: //p')"
-curl --fail -i -X DELETE http://127.0.0.1:18080/documents/hello \
-  -H "If-Match: $etag"
 kill -TERM "$runner_pid"
 wait "$runner_pid"
 ```
 
-The Document is removed and the Runner stops its processes. The temporary directory retains the package, logs, configuration and result for inspection; remove it when no longer needed. A deployed system should use its service manager and an appropriate persistent state directory instead.
+A deployed system should use its service manager and an appropriate persistent state directory instead.
