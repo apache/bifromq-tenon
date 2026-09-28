@@ -62,6 +62,7 @@ async fn pull_snapshot_tracks_cpu_and_current_rss_without_including_children() -
         .args([
             "--exact",
             "metrics::runtime::tests::resources::resource_load_child",
+            "--ignored",
             "--nocapture",
         ])
         .env("TENON_METRICS_TEST_CHILD_READY", &ready)
@@ -92,6 +93,7 @@ async fn pull_snapshot_tracks_cpu_and_current_rss_without_including_children() -
 }
 
 #[test]
+#[ignore = "child process entry point invoked by the parent resource test"]
 fn resource_load_child() -> io::Result<()> {
     let Some(ready) = std::env::var_os("TENON_METRICS_TEST_CHILD_READY") else {
         return Ok(());

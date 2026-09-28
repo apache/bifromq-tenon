@@ -311,6 +311,7 @@ async fn abandoning_terminal_ownership_aborts_before_deleting_queue_files() -> T
         .args([
             "--exact",
             "pipeline::reconfigure::resource_stage::cutover::tests::abandoned_candidate_child",
+            "--ignored",
             "--nocapture",
         ])
         .env("TENON_TEST_ABANDONED_CANDIDATE_ROOT", parent.path())
@@ -330,6 +331,7 @@ async fn abandoning_terminal_ownership_aborts_before_deleting_queue_files() -> T
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "child process entry point invoked by the parent cutover test"]
 async fn abandoned_candidate_child() -> TestResult {
     let Some(parent) = std::env::var_os("TENON_TEST_ABANDONED_CANDIDATE_ROOT") else {
         return Ok(());

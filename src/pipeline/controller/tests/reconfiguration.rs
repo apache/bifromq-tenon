@@ -65,6 +65,7 @@ async fn expires_at_boundary(boundary: &str) -> TestResult {
         .args([
             "--exact",
             "pipeline::controller::tests::reconfiguration::blocked_boundary_child",
+            "--ignored",
             "--nocapture",
         ])
         .env(CHILD_ROOT, parent.path())
@@ -78,6 +79,7 @@ async fn expires_at_boundary(boundary: &str) -> TestResult {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "child process entry point invoked by the parent controller test"]
 async fn blocked_boundary_child() -> TestResult {
     let Some(parent) = std::env::var_os(CHILD_ROOT) else {
         return Ok(());

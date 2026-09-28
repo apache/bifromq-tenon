@@ -44,6 +44,7 @@ async fn expires_without_drop(operation: &str) -> TestResult {
         .args([
             "--exact",
             "pipeline::controller::tests::deadline::deadline_drop_child",
+            "--ignored",
             "--nocapture",
         ])
         .env(CHILD_ROOT, parent.path())
@@ -58,6 +59,7 @@ async fn expires_without_drop(operation: &str) -> TestResult {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "child process entry point invoked by the parent deadline test"]
 async fn deadline_drop_child() -> TestResult {
     let Some(parent) = std::env::var_os(CHILD_ROOT) else {
         return Ok(());

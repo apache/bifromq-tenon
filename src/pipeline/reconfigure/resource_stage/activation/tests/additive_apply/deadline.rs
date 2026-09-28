@@ -106,7 +106,7 @@ async fn run_child(scenario: &str) -> TestResult<(tempfile::TempDir, std::proces
     let parent = tempfile::tempdir()?;
     let root = parent.path().join("pipeline");
     let mut command = tokio::process::Command::new(std::env::current_exe()?);
-    command.args(["--exact", "pipeline::reconfigure::resource_stage::activation::tests::additive_apply::deadline::deadline_child", "--nocapture"])
+    command.args(["--exact", "pipeline::reconfigure::resource_stage::activation::tests::additive_apply::deadline::deadline_child", "--ignored", "--nocapture"])
         .env(CHILD_ROOT, parent.path())
         .env("TENON_TEST_RECONFIGURATION_SCENARIO", scenario);
     let outcome =
@@ -140,6 +140,7 @@ async fn run_child(scenario: &str) -> TestResult<(tempfile::TempDir, std::proces
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "child process entry point invoked by the parent deadline test"]
 async fn deadline_child() -> TestResult {
     let Some(parent) = std::env::var_os(CHILD_ROOT) else {
         return Ok(());

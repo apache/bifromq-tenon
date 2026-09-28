@@ -170,6 +170,7 @@ fn install_load(state: &Path, mode: &str, markers: &Path) -> io::Result<()> {
         executable.to_string_lossy().as_ref(),
         "--exact",
         "linux::resource_load_child",
+        "--ignored",
         "--nocapture",
     ])?;
     let script = format!(
@@ -199,6 +200,7 @@ fn install_load(state: &Path, mode: &str, markers: &Path) -> io::Result<()> {
 }
 
 #[test]
+#[ignore = "child process entry point invoked by the delegated resource harness"]
 fn resource_load_child() -> io::Result<()> {
     let Ok(mode) = std::env::var("TENON_TEST_RESOURCE_MODE") else {
         return Ok(());

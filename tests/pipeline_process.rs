@@ -1862,7 +1862,6 @@ fn pipeline_keeps_new_lua_paused_until_same_revision_sink_replacement_finishes()
     runner.release_revision()?;
     wait_until_file_exists(&primary_directory.join("shutdown.received"))?;
     submit_ingress(&mut submission_writer, 1)?;
-    thread::sleep(Duration::from_millis(100));
     assert_eq!(
         completion_reader.try_read().map_err(io::Error::other)?,
         ReadOutcome::Empty

@@ -368,18 +368,28 @@ fn runner_shutdown_during_restart_backoff_does_not_launch_another_pipeline() -> 
     write_document(directory.path(), "backoff-shutdown", &source)?;
     let config_path =
         write_config_with_pipeline_timing(directory.path(), 2_000, 1_000, 5_000, 5_000)?;
-    let mut runner = TestRunner::spawn(&config_path)?;
+    let startup_log = directory.path().join("startup.log");
+    let mut command = runner_command(&config_path);
+    command.env("TENON_TEST_PLUGIN_STARTS", &startup_log);
+    let mut runner = TestRunner::spawn_command(command)?;
     let runtime_root = wait_for_runtime_root(directory.path())?;
     let pipeline_directory = runtime_root.join(sha256_hex(source.as_bytes()));
     let first_pipeline = wait_for_plugin_markers(&runtime_root, None)
         .map_err(|source| test_step_error("First Pipeline did not start", source))?;
+    wait_until(|| {
+        let starts = match fs::read_to_string(&startup_log) {
+            Ok(starts) => starts,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(source),
+        };
+        Ok((starts.lines().count() == 2).then_some(()))
+    })?;
 
     kill_process(first_pipeline, Signal::KILL).map_err(io::Error::from)?;
     wait_for_processes_to_exit([first_pipeline])
         .map_err(|source| test_step_error("First Pipeline did not exit", source))?;
     wait_until(|| Ok((!pipeline_directory.exists()).then_some(())))
         .map_err(|source| test_step_error("Pipeline working directory was not removed", source))?;
-    thread::sleep(Duration::from_millis(300));
     assert!(!pipeline_directory.exists());
     assert!(named_files(&runtime_root, "starts.received")?.is_empty());
     assert!(runner.is_running()?);
@@ -390,6 +400,7 @@ fn runner_shutdown_during_restart_backoff_does_not_launch_another_pipeline() -> 
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(fs::read_to_string(startup_log)?.lines().count(), 2);
     assert!(!runtime_root.exists());
     Ok(())
 }

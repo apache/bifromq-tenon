@@ -67,7 +67,7 @@ TENON_TEST_PLUGIN_WORKING_DIRECTORY="${2#*workingDirectory\":\"}"
 TENON_TEST_PLUGIN_WORKING_DIRECTORY="${TENON_TEST_PLUGIN_WORKING_DIRECTORY%%\"*}"
 export TENON_TEST_PLUGIN_INTERFACE TENON_TEST_PLUGIN_SDK_CONFIG
 export TENON_TEST_PLUGIN_WORKING_DIRECTORY
-exec "$child" --exact CHILD_TEST_NAME --nocapture
+exec "$child" --exact CHILD_TEST_NAME --ignored --nocapture
 "#;
 
 #[expect(
@@ -101,6 +101,7 @@ pub(crate) fn controlled_program_command(interface: PluginInterface) -> io::Resu
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "child process entry point invoked by the parent plugin test"]
 async fn plugin_control_child_process() -> Result<(), Box<dyn Error>> {
     let Ok(context) = ChildContext::from_environment() else {
         return Ok(());

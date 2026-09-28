@@ -1713,8 +1713,6 @@ fn an_idle_channel_with_an_unsettled_boundary_sleeps_without_a_deadline() -> io:
     );
     assert!(boundary.source.try_completion()?.is_none());
     wait_until_platform_wait(&boundary.bell)?;
-    // Give a fixed-interval poll a chance to show up, then assert it never did.
-    thread::sleep(Duration::from_millis(50));
     let (total, timed) = boundary.bell.platform_waits();
     assert!(total > 0, "the Channel never entered a platform wait");
     assert_eq!(

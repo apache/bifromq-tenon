@@ -223,7 +223,7 @@ async fn stop_during_initial_apply_interrupts_lua_and_awaits_cleanup() -> TestRe
 async fn unreaped_child_failure_aborts_with_diagnostics_before_deleting_queues() -> TestResult {
     let parent = tempfile::tempdir()?;
     let mut command = tokio::process::Command::new(std::env::current_exe()?);
-    command.args(["--exact", "pipeline::reconfigure::resource_stage::activation::tests::initial_apply::unreaped_failure_child", "--nocapture"])
+    command.args(["--exact", "pipeline::reconfigure::resource_stage::activation::tests::initial_apply::unreaped_failure_child", "--ignored", "--nocapture"])
         .env("TENON_TEST_UNREAPED_FAILURE_ROOT", parent.path()).kill_on_drop(true);
     let output = timeout(TEST_DEADLINE, command.output()).await??;
     assert_eq!(output.status.signal(), Some(libc::SIGABRT));
@@ -240,6 +240,7 @@ async fn unreaped_child_failure_aborts_with_diagnostics_before_deleting_queues()
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "child process entry point invoked by the parent cleanup test"]
 async fn unreaped_failure_child() -> TestResult {
     let Some(parent) = std::env::var_os("TENON_TEST_UNREAPED_FAILURE_ROOT") else {
         return Ok(());

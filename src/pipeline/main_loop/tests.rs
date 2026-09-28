@@ -23,6 +23,7 @@ use std::error::Error;
 use std::path::PathBuf;
 
 #[test]
+#[ignore = "child process entry point invoked by the parent pipeline test"]
 fn instance_flow_pipeline_child() -> Result<(), Box<dyn Error>> {
     let Some(record_directory) = std::env::var_os("TENON_TEST_PIPELINE_RECORDS") else {
         return Ok(());

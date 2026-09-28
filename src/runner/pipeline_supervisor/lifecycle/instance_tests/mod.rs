@@ -797,7 +797,7 @@ TENON_TEST_PIPELINE_RECORDS={}
 TENON_TEST_PIPELINE_CONTROL_SOCKET="$3"
 TENON_TEST_PIPELINE_LAUNCH_ID="$5"
 export TENON_TEST_PIPELINE_RECORDS TENON_TEST_PIPELINE_CONTROL_SOCKET TENON_TEST_PIPELINE_LAUNCH_ID
-exec {} --exact pipeline::main_loop::tests::instance_flow_pipeline_child --nocapture
+exec {} --exact pipeline::main_loop::tests::instance_flow_pipeline_child --ignored --nocapture
 "#,
             shell_quote(records.to_str().ok_or("records path is not UTF-8")?),
             shell_quote(

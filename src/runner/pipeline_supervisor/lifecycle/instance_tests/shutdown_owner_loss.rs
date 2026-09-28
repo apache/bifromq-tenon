@@ -85,6 +85,7 @@ async fn owner_loss_case(phase: WaitingPhase, loss: OwnerLoss) -> TestResult {
         .args([
             "--exact",
             "pipeline::main_loop::tests::instance_flow_pipeline_child",
+            "--ignored",
             "--nocapture",
         ])
         .env("TENON_TEST_PIPELINE_RECORDS", parent.path())
