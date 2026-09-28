@@ -17,6 +17,8 @@
  * under the License.
  */
 
+//! Mapped Queue ordering, release, replay, and cross-process wait/wake contracts.
+
 use std::fs;
 use std::io;
 use std::num::NonZeroU64;

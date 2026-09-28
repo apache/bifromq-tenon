@@ -23,7 +23,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+publish = ["crates-io"]
 
 [features]
 repository-test-support = []
@@ -36,6 +36,7 @@ memmap2.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
 loom.workspace = true
 proptest.workspace = true
 serde.workspace = true

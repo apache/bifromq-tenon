@@ -744,6 +744,7 @@ const fn padding_len(unpadded_len: usize) -> usize {
     (FRAME_ALIGNMENT - unpadded_len % FRAME_ALIGNMENT) % FRAME_ALIGNMENT
 }
 
+/// Queue endpoint constructors for repository contract and interoperability tests.
 #[cfg(any(test, feature = "repository-test-support"))]
 pub mod contract_test_support {
     use std::io;

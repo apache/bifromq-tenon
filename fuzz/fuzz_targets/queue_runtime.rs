@@ -21,9 +21,9 @@
 
 use libfuzzer_sys::fuzz_target;
 
-#[path = "../../ipc/rust/tenon-ipc/tests/support/doorbell_queue.rs"]
+#[path = "../../sdk/rust/ipc/tests/support/doorbell_queue.rs"]
 mod doorbell_queue;
-#[path = "../../ipc/rust/tenon-ipc/tests/support/ipc_queue_model.rs"]
+#[path = "../../sdk/rust/ipc/tests/support/ipc_queue_model.rs"]
 mod ipc_queue_model;
 
 fuzz_target!(|input: &[u8]| {

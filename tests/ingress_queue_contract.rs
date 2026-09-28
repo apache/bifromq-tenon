@@ -28,7 +28,7 @@ use tenon_ipc::queue::{AppendDecision, DataCapacity, Header, LogicalPosition, pl
     dead_code,
     reason = "Admission properties use only the shared model capacity and FIFO operations"
 )]
-#[path = "../ipc/rust/tenon-ipc/tests/support/queue_model.rs"]
+#[path = "../sdk/rust/ipc/tests/support/queue_model.rs"]
 mod queue_model;
 use queue_model::{ModelAppendOutcome, QueueModel};
 fn parse_non_zero(value: &str) -> io::Result<NonZeroU64> {

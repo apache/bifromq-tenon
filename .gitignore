@@ -22,8 +22,6 @@
 /sdk/rust/target/
 /output/
 
-/ipc/java/**/target/
-/ipc/java/**/.flattened-pom.xml
 /sdk/java/**/dependency-reduced-pom.xml
 **/target/
 # This directory contains Runner source, not Cargo build output.

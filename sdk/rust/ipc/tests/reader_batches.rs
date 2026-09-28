@@ -17,6 +17,8 @@
  * under the License.
  */
 
+//! Reader batches preserve frame boundaries and shared release progress.
+
 use std::{io, num::NonZeroU64};
 use tenon_ipc::{
     bell::WaitOutcome,

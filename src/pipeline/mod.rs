@@ -246,7 +246,7 @@ pub(crate) mod contract_test_support {
 }
 
 #[cfg(all(test, not(feature = "loom-model")))]
-#[path = "../../ipc/rust/tenon-ipc/tests/support/wait.rs"]
+#[path = "../../sdk/rust/ipc/tests/support/wait.rs"]
 mod queue_test_support;
 
 #[cfg(test)]

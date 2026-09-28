@@ -21,7 +21,7 @@ under the License.
 
 Tenon is part of Apache BifroMQ (Incubating). See the [incubation disclaimer](../DISCLAIMER).
 
-Use this reference when implementing IPC for a Tenon Plugin SDK in a new language or maintaining an existing SDK. It specifies Queue v1 and Bell Region v1 file formats, memory ordering, endpoint lifetime and failure behavior required for interoperability. The [SDK implementation contract](../sdk/plugin-sdk-contract.md) covers startup, Source/Sink adapters and scaffolding. To develop a plugin with an existing SDK, start with the [plugin development guide](../guide/plugins.md#sdks-and-generators).
+Use this reference when implementing IPC for a Tenon Plugin SDK in a new language or maintaining an existing SDK. It specifies Queue v1 and Bell Region v1 file formats, memory ordering, endpoint lifetime and failure behavior required for interoperability. The [SDK implementation contract](plugin-sdk-contract.md) covers startup, Source/Sink adapters and scaffolding. To develop a plugin with an existing SDK, start with the [plugin development guide](../guide/plugins.md#sdks-and-generators).
 
 A Queue transports bounded, non-overwriting, single-producer/single-consumer (SPSC) framed bytes through a shared memory-mapped file. A Bell is a coalescing notification that asks one waiting loop to recheck its conditions. Queue positions and the caller's local state establish facts; notifications do not.
 
@@ -29,14 +29,14 @@ A Queue transports bounded, non-overwriting, single-producer/single-consumer (SP
 
 | Implementation | Consumers | Distribution |
 | --- | --- | --- |
-| [Rust `tenon-ipc`](rust/tenon-ipc/) | Runner and Rust Plugin SDK | One shared crate, versioned with the SDK. The SDK includes IPC as a transitive dependency. |
-| [Java `tenon-ipc`](java/tenon-ipc/) | Java Plugin SDK | An internal Reactor module. Its production classes are embedded in `tenon-plugin-sdk`; it is not independently installed or deployed. |
+| [Rust `tenon-ipc`](rust/ipc/) | Runner and Rust Plugin SDK | An independently reusable crate, versioned with the SDK. The SDK includes IPC as a transitive dependency. |
+| [Java `tenon-ipc`](java/ipc/) | Java Plugin SDK | An independently reusable Maven artifact, versioned with the SDK. The SDK includes IPC as a transitive dependency. |
 
 IPC owns file validation, frame planning, mappings, atomic positions, reader/writer operations, owned record bytes, and Bell wait/wake. It does not depend on Runner, Pipeline, SDK lifecycle, business Protobuf messages, Lua, or metrics.
 
 The upper layer creates files and assigns exactly one live writer and one live reader per Queue. It also assigns one waiting loop to each Bell slot and owns paths, business encoding, completion policy, shutdown, and resource removal. A loop may own several Queue endpoints, and many peers may ring its slot. Neither the Queue nor the Bell file contains an ownership lock, reference count, or second liveness protocol.
 
-The [SDK implementation contract](../sdk/plugin-sdk-contract.md) defines how Source submission, Source completion, and Sink egress use these primitives. IPC itself does not interpret those records.
+The [SDK implementation contract](plugin-sdk-contract.md) defines how Source submission, Source completion, and Sink egress use these primitives. IPC itself does not interpret those records.
 
 ## Queue v1 layout
 
@@ -184,11 +184,11 @@ Queue metrics are upper-layer observations. An observer may hold a weak mapping 
 
 ## Build and acceptance
 
-Use the versions pinned by [`rust-toolchain.toml`](../rust-toolchain.toml), the Cargo lockfiles, and the [Java toolchain properties](../sdk/java/.mvn/tenon-toolchain.properties). The Maven wrapper selects the pinned JDK and Maven. Run from the repository root:
+Use the versions pinned by [`rust-toolchain.toml`](../rust-toolchain.toml), the Cargo lockfiles, and the [Java toolchain properties](java/.mvn/tenon-toolchain.properties). The Maven wrapper selects the pinned JDK and Maven. Run from the repository root:
 
 ```sh
 cargo test -p tenon-ipc --all-targets --features repository-test-support --locked -- --test-threads=1
-sdk/java/mvnw --batch-mode --file ipc/java/tenon-ipc/pom.xml verify
+sdk/java/mvnw --batch-mode --file sdk/java/ipc/pom.xml verify
 tools/verify-rust.sh
 python3 tools/verify-ipc-fuzz.py
 ```
@@ -199,17 +199,17 @@ Consume the shared [Queue vectors](../contracts/ipc/queue_v1_test_vectors.json) 
 
 | Required proof | Executable evidence |
 | --- | --- |
-| Exact layouts, append/wrap, corrupt input, and stable error codes | Shared vectors; Rust [format tests](rust/tenon-ipc/tests/format_contract.rs); Java [contract tests](java/tenon-ipc/src/test/java/org/apache/bifromq/tenon/sdk/ipc/) |
-| FIFO, Full/Empty with no mutation, owned copies, prefix release, reopen, and interruption | Rust [runtime tests](rust/tenon-ipc/tests/runtime_contract.rs) and [reader batches](rust/tenon-ipc/tests/reader_batches.rs); Java runtime tests |
+| Exact layouts, append/wrap, corrupt input, and stable error codes | Shared vectors; Rust [format tests](rust/ipc/tests/format_contract.rs); Java [contract tests](java/ipc/src/test/java/org/apache/bifromq/tenon/sdk/ipc/) |
+| FIFO, Full/Empty with no mutation, owned copies, prefix release, reopen, and interruption | Rust [runtime tests](rust/ipc/tests/runtime_contract.rs) and [reader batches](rust/ipc/tests/reader_batches.rs); Java runtime tests |
 | Publish before arm, before sleep, or after sleep; local interruption, closure, and notification failure | Rust Bell concurrency models and real native wait/wake tests |
-| Writer failure during header/body/padding/wrap/commit/notification; reader failure during copy/release | Real mappings and child-process `SIGKILL` [tests](rust/tenon-ipc/src/queue/mapped/tests/crash.rs) |
+| Writer failure during header/body/padding/wrap/commit/notification; reader failure during copy/release | Real mappings and child-process `SIGKILL` [tests](rust/ipc/src/queue/mapped/tests/crash.rs) |
 | Rust writer to Java reader and Java writer to Rust reader; lifecycle and recovery | [Runner Java integration tests](../tests/runner_java_archetype.rs), Java SDK lifecycle tests, and Rust SDK process tests |
 | Arbitrary bytes and bounded operation sequences | [Fuzz targets](../fuzz/) and the shared Queue model |
 
-Check packaged artifacts as well as source builds: generate the Rust IPC/SDK archives and build projects from their extracted contents; for Java, use an isolated Maven repository containing the public SDK, Maven Plugin and Archetype. The [CI matrix](../.github/workflows/ci.yml) lists native OS/CPU targets. Run applicable tests on every supported target and record the revision and platform.
+Check packaged artifacts as well as source builds: generate the Rust IPC/SDK archives and build projects from their extracted contents; for Java, use an isolated Maven repository containing IPC, process-metrics, the Plugin SDK, Maven Plugin and Archetype. The [CI matrix](../.github/workflows/ci.yml) lists native OS/CPU targets. Run applicable tests on every supported target and record the revision and platform.
 
 For performance changes, measure throughput, latency, CPU and memory at equivalent acknowledgement boundaries. Include independent-channel stalls; the benchmark is excluded from ordinary correctness runs.
 
 ## Adding a language
 
-Start with `ipc/<language>` and prove this contract using the shared vectors, corruption and crash cases, real wait/wake, and bidirectional interoperability. Next implement lifecycle and Source/Sink adapters under `sdk/<language>/plugin-sdk` using the [SDK contract](../sdk/plugin-sdk-contract.md). Then supply source, sink, and source-and-sink project scaffolds, bundle/install validation, and real Runner data-flow and failure tests. Declare official support only after the applicable acceptance passes on every claimed target.
+Start with `sdk/<language>/ipc` and prove this contract using the shared vectors, corruption and crash cases, real wait/wake, and bidirectional interoperability. Next implement lifecycle and Source/Sink adapters under `sdk/<language>/plugin-sdk` using the [SDK contract](plugin-sdk-contract.md). Then supply source, sink, and source-and-sink project scaffolds, bundle/install validation, and real Runner data-flow and failure tests. Declare official support only after the applicable acceptance passes on every claimed target.

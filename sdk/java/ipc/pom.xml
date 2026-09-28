@@ -24,10 +24,9 @@ under the License.
         <groupId>org.apache.bifromq.tenon</groupId>
         <artifactId>tenon-java-build</artifactId>
         <version>0.1.0</version>
-        <relativePath>../../../sdk/java/pom.xml</relativePath>
     </parent>
     <artifactId>tenon-ipc</artifactId>
-    <name>Tenon Internal IPC</name>
+    <name>Tenon IPC</name>
     <dependencies>
         <dependency>
             <groupId>com.google.protobuf</groupId>
@@ -67,20 +66,6 @@ under the License.
                         </goals>
                     </execution>
                 </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-install-plugin</artifactId>
-                <configuration>
-                    <skip>true</skip>
-                </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-deploy-plugin</artifactId>
-                <configuration>
-                    <skip>true</skip>
-                </configuration>
             </plugin>
         </plugins>
     </build>

@@ -40,7 +40,7 @@ cargo generate --path "$tenon_root/sdk/rust/rust-plugin-scaffold" \
 cd hello-tenon
 cargo tenon bundle \
   --config "patch.crates-io.tenon-plugin-sdk.path=\"$tenon_root/sdk/rust/plugin-sdk\"" \
-  --config "patch.crates-io.tenon-ipc.path=\"$tenon_root/ipc/rust/tenon-ipc\"" \
+  --config "patch.crates-io.tenon-ipc.path=\"$tenon_root/sdk/rust/ipc\"" \
   > "$demo_root/bundle.json"
 bundle="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$demo_root/bundle.json")"
 ```

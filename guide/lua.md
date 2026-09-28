@@ -23,6 +23,25 @@ Tenon is part of Apache BifroMQ (Incubating). See the [incubation disclaimer](..
 
 A Flow embeds UTF-8 Lua 5.5 source in `process.script` and defines `function main(event)`. ASCII identifiers and normal Lua 5.5 declarations are supported; strings and comments may contain Unicode. `specVersion` selects the language/API contract.
 
+## Event-Driven Stateful Transducer
+
+Tenon Lua uses the **Event-Driven Stateful Transducer** processing model. Each Flow Channel owns a long-lived Lua computation that serially consumes runtime events, updates private in-memory state, and requests zero or more effects. Some effects produce future events for the same channel.
+
+Conceptually, one event is processed as `(state, event) → (next state, effects)`. Scripts update variables and call runtime APIs directly; `main(event)` does not return a state/effect tuple.
+
+| Part | Tenon Lua behavior |
+| --- | --- |
+| Events | Source input and timer expiration enter the same `main(event)`, one event at a time. |
+| State | Custom globals and closure state survive between calls within the same VM. Channels have independent state. |
+| Effects | `emit(payload)` requests output to the Flow's Sinks; `emit()` establishes a completion-only boundary. `setTimeout` schedules or replaces a timer, and `clearTimeout` cancels one. |
+| Future events | A pending timer produces a later timer event in the same VM. Even a zero-delay timer waits for the event loop; it never reenters `main` synchronously. |
+
+Pure filtering and mapping fit this model without keeping application state between events. Stateful scripts can accumulate records, debounce input, or change behavior as events arrive. State and timers are volatile and are recreated when the VM resets. Tenon does not persist Lua execution progress or provide durable Lua state or timers.
+
+Each accepted effect follows its own completion rules. Returning from `main` does not establish a transaction across state changes and outputs; accepted outputs survive a later script failure. See [failed inputs and execution](#failed-inputs-and-execution) and [delivery completion](tenon-document.md#completion-and-delivery).
+
+## Script lifecycle
+
 Each channel runs the script independently. It executes top-level initialization once, then calls `main` for Source and timer events one at a time. Other channels have independent state and can execute concurrently. Static Document validation compiles source without running initialization; actual initialization requires the resolved Source and Sink contracts. After initialization, `main` and the built-in globals are read-only. Custom globals and closure state remain mutable.
 
 ## Events and payloads

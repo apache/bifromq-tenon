@@ -25,7 +25,7 @@ Tenon's plugin architecture is general-purpose. Source and Sink plugins can conn
 
 See the [incubation disclaimer](DISCLAIMER).
 
-Tenon combines typed plugins with Lua data processing. A standalone Runner manages installed plugin programs and declarative Tenon Documents. Each Document describes a Pipeline; its Flows read from Source instances, transform records in Lua, and write to Sink instances.
+Tenon combines typed plugins with Lua processing based on the [Event-Driven Stateful Transducer](guide/lua.md#event-driven-stateful-transducer) model. A standalone Runner manages installed plugin programs and declarative Tenon Documents. Each Document describes a Pipeline; its Flow Channels react to Source and timer events, maintain private in-memory state, and emit records to Sink instances.
 
 ```text
 Source Plugin → Flow Channel / Lua → Sink Plugin
@@ -58,7 +58,7 @@ Java development uses the Maven wrapper under `sdk/java/` and the exact JDK reco
 
 ## Core concepts
 
-A **Program** is an immutable installed package identified by its name and exact version. An **Instance** is one configured use of that Program. A **Flow** binds one Source instance to Lua and one or more Sink instances. A **Channel** processes records in order; parallel channels have independent Lua state.
+A **Program** is an immutable installed package identified by its name and exact version. An **Instance** is one configured use of that Program. A **Flow** binds one Source instance to Lua and one or more Sink instances. A **Channel** processes Source and timer events serially; parallel channels have independent Lua state.
 
 The Runner saves Documents and installed packages across restarts. Saving a Document and applying it are separate outcomes. Use Pipeline status and its desired/applied ETags to see progress; local `running` status does not prove delivery to an external system.
 
@@ -77,8 +77,8 @@ Management write access grants control over executable workloads. The default Ru
 - [Metrics and live diagnostics](guide/observability.md)
 - [Runner extension interfaces](guide/runner-extensions.md)
 - [Developing a language SDK and scaffold](sdk/plugin-sdk-contract.md)
-- [IPC protocol for SDK developers](ipc/README.md)
-- [Process sampling contract and language implementations](sdk/process-metrics.md)
+- [IPC protocol for SDK developers](sdk/ipc_contract.md)
+- [Process sampling contract and language implementations](sdk/process-metrics-contract.md)
 - [Contributing and verification](CONTRIBUTING.md)
 
 Machine-readable schemas and shared test vectors live in [contracts/](contracts/). The running binary serves its own API description at `/openapi.json` and its Document Schema at `/document-schema`.

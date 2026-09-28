@@ -65,12 +65,12 @@ jobs:
         uses: actions/cache@v5
         with:
           path: target/runner-java-archetype/maven-repository
-          key: runner-java-maven-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sdk/java/**/pom.xml', 'ipc/java/**/pom.xml', 'sdk/java/.mvn/**', 'sdk/java/mvnw') }}
+          key: runner-java-maven-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sdk/java/**/pom.xml', 'sdk/java/.mvn/**', 'sdk/java/mvnw') }}
       - name: Restore verified Java Plugin bundles
         uses: actions/cache@v5
         with:
           path: target/runner-java-archetype/packages
-          key: runner-java-bundles-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sdk/java/**', 'ipc/java/**', 'contracts/ipc/**', 'contracts/source/**', 'contracts/sink/**', 'contracts/plugin/**', 'tests/fixtures/java-*/**', 'tests/runner_java_archetype.rs', 'Cargo.toml') }}
+          key: runner-java-bundles-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sdk/java/**', 'contracts/ipc/**', 'contracts/source/**', 'contracts/sink/**', 'contracts/plugin/**', 'tests/fixtures/java-*/**', 'tests/runner_java_archetype.rs', 'Cargo.toml') }}
       - name: Restore the fixed Rust template generator
         id: cargo-generate
         uses: actions/cache@v5

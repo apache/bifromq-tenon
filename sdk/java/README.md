@@ -78,7 +78,7 @@ Unbound directions do not create workers.
 
 To implement the SDK process-metrics contract, this SDK automatically reports this Plugin process's CPU consumption (`tenon.plugin.cpu`, logical cores) and current RSS (`tenon.plugin.memory`, bytes) when the Runner receives a metrics request. A combined Source-and-Sink owner reports one process. The first CPU observation is absent while its baseline is established; missing observations are never zero. Authors do not add instrumentation or a collector. Lifecycle and Queue operations are independent of metrics collection.
 
-The SDK depends on the reusable `org.apache.bifromq.tenon:tenon-process-metrics` artifact under `sdk/java/process-metrics` and pins and shades its private OpenTelemetry API, SDK and binary converter. The [process-metrics contract](../process-metrics.md) defines CPU/RSS sampling; the library can also be used independently. It uses a separate gRPC channel with asynchronous callbacks and scheduled stream reconnection; it does not register a global provider or expose OTel types to Plugin authors.
+The SDK depends on the reusable `org.apache.bifromq.tenon:tenon-process-metrics` artifact under `sdk/java/process-metrics` and pins and shades its private OpenTelemetry API, SDK and binary converter. The [process-metrics contract](../process-metrics-contract.md) defines CPU/RSS sampling; the library can also be used independently. It uses a separate gRPC channel with asynchronous callbacks and scheduled stream reconnection; it does not register a global provider or expose OTel types to Plugin authors.
 
 ## Packaging
 

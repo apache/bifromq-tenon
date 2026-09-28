@@ -16,7 +16,7 @@
 # under the License.
 
 [workspace]
-members = ["plugin-sdk", "process-metrics", "cargo-tenon"]
+members = ["ipc", "plugin-sdk", "process-metrics", "cargo-tenon"]
 resolver = "3"
 
 [workspace.package]
@@ -28,11 +28,11 @@ repository = "https://github.com/apache/incubator-bifromq-tenon"
 publish = false
 
 [workspace.dependencies]
+tenon-ipc = { path = "ipc", version = "=0.1.0" }
 tenon-process-metrics = { path = "process-metrics", version = "=0.1.0" }
 opentelemetry = { version = "=0.32.0", default-features = false, features = ["metrics"] }
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "metrics"] }
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics", "experimental_metrics_custom_reader"] }
-tenon-ipc = { path = "../../ipc/rust/tenon-ipc", version = "=0.1.0" }
 base64 = { version = "=0.23.0", default-features = false, features = ["std"] }
 bytes = "=1.12.1"
 cpu-time = "=1.0.0"

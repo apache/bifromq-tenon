@@ -719,7 +719,6 @@ fn java_build_fingerprint(workspace: &Path, classifier: &str) -> io::Result<Stri
     );
     for relative in [
         "sdk/java",
-        "ipc/java",
         "contracts/ipc",
         "contracts/source",
         "contracts/sink",
@@ -839,7 +838,8 @@ fn build_generated_project(
 }
 
 fn verify_java_release_repository(local_repository: &Path) -> io::Result<()> {
-    const RELEASE_ARTIFACTS: [&str; 4] = [
+    const RELEASE_ARTIFACTS: [&str; 5] = [
+        "tenon-ipc",
         "tenon-maven-plugin",
         "tenon-plugin-archetype",
         "tenon-plugin-sdk",
@@ -857,7 +857,7 @@ fn verify_java_release_repository(local_repository: &Path) -> io::Result<()> {
     actual.sort_unstable();
     if actual != RELEASE_ARTIFACTS {
         return Err(io::Error::other(format!(
-            "Java release repository must contain exactly four public artifacts; observed {actual:?}"
+            "Java release repository must contain exactly five public artifacts; observed {actual:?}"
         )));
     }
 
@@ -869,13 +869,20 @@ fn verify_java_release_repository(local_repository: &Path) -> io::Result<()> {
                 .join(version)
                 .join(format!("{artifact}-{version}.pom")),
         )?;
-        if pom.contains("<parent>")
-            || pom.contains("tenon-java-build")
-            || pom.contains("<artifactId>tenon-ipc</artifactId>")
-        {
+        if pom.contains("<parent>") || pom.contains("tenon-java-build") {
             return Err(io::Error::other(format!(
                 "Published {artifact} POM still depends on a private Java build module"
             )));
+        }
+        if pom.contains("<classifier>tests</classifier>") {
+            return Err(io::Error::other(format!(
+                "Published {artifact} POM still depends on test fixtures"
+            )));
+        }
+        if artifact == "tenon-plugin-sdk" && !pom.contains("<artifactId>tenon-ipc</artifactId>") {
+            return Err(io::Error::other(
+                "Published SDK POM must retain its IPC dependency",
+            ));
         }
     }
     Ok(())

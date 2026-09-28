@@ -39,7 +39,7 @@ under the License.
     </licenses>
 
     <modules>
-        <module>../../ipc/java/tenon-ipc</module>
+        <module>ipc</module>
         <module>process-metrics</module>
         <module>plugin-sdk</module>
         <module>maven-plugin</module>

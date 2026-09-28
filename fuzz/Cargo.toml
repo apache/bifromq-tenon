@@ -30,7 +30,7 @@ members = ["."]
 [dependencies]
 libfuzzer-sys = "=0.4.13"
 tempfile = "=3.27.0"
-tenon-ipc = { path = "../ipc/rust/tenon-ipc" }
+tenon-ipc = { path = "../sdk/rust/ipc" }
 
 [[bin]]
 name = "queue_format"

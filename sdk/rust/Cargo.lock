@@ -1721,9 +1721,15 @@ name = "tenon-ipc"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "cpu-time",
  "libc",
+ "loom",
  "memmap2",
+ "proptest",
  "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

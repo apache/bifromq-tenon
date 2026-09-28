@@ -17,6 +17,8 @@
  * under the License.
  */
 
+//! Shared Queue and Bell format vectors, corruption cases, and append properties.
+
 use std::collections::VecDeque;
 use std::fs;
 use std::io;

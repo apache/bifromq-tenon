@@ -104,7 +104,6 @@ under the License.
                         <configuration>
                             <artifactSet>
                                 <includes>
-                                    <include>org.apache.bifromq.tenon:tenon-ipc</include>
                                     <include>io.opentelemetry:*</include>
                                 </includes>
                             </artifactSet>
@@ -114,17 +113,6 @@ under the License.
                                     <shadedPattern>org.apache.bifromq.tenon.sdk.internal.otel</shadedPattern>
                                 </relocation>
                             </relocations>
-                            <filters>
-                                <filter>
-                                    <artifact>org.apache.bifromq.tenon:tenon-ipc</artifact>
-                                    <excludes>
-                                        <exclude>META-INF/MANIFEST.MF</exclude>
-                                        <exclude>META-INF/LICENSE</exclude>
-                                        <exclude>META-INF/NOTICE</exclude>
-                                        <exclude>META-INF/DISCLAIMER</exclude>
-                                    </excludes>
-                                </filter>
-                            </filters>
                             <createDependencyReducedPom>true</createDependencyReducedPom>
                             <useDependencyReducedPomInJar>true</useDependencyReducedPomInJar>
                         </configuration>
