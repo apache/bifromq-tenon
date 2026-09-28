@@ -47,7 +47,11 @@ impl PendingCollection {
         clippy::expect_used,
         reason = "the session lock only transfers ownership without user code"
     )]
-    pub(super) fn start(connection: Arc<Connection>, include: &[String]) -> Option<Self> {
+    pub(super) fn start(
+        connection: Arc<Connection>,
+        include: &[String],
+        deadline: Deadline,
+    ) -> Option<Self> {
         let session = connection
             .lock()
             .expect("metrics session lock must not be poisoned")
@@ -56,6 +60,11 @@ impl PendingCollection {
             .commands
             .try_send(Ok(RunnerToPipelineMetrics {
                 include: include.to_vec(),
+                remaining_timeout_ms: deadline
+                    .remaining()
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
             }))
             .ok()?;
         Some(Self {

@@ -43,6 +43,7 @@ use crate::tenon_document::SourceDelivery;
 /// Immutable inputs shared by every FlowChannel in one Flow revision.
 #[derive(Clone, Debug)]
 pub(crate) struct FlowChannelSpec {
+    source_instance: Arc<str>,
     lua_source: Arc<str>,
     lua_limits: ScriptVmLimits,
     max_record_bytes: NonZeroU64,
@@ -54,6 +55,7 @@ pub(crate) struct FlowChannelSpec {
 impl FlowChannelSpec {
     /// Freezes the validated message roots used for initial load and VM rebuilds.
     pub(crate) fn new(
+        source_instance: &str,
         lua_source: impl AsRef<str>,
         lua_limits: ScriptVmLimits,
         max_record_bytes: NonZeroU64,
@@ -62,6 +64,7 @@ impl FlowChannelSpec {
         delivery: SourceDelivery,
     ) -> Self {
         Self {
+            source_instance: Arc::from(source_instance),
             lua_source: Arc::from(lua_source.as_ref()),
             lua_limits,
             max_record_bytes,
@@ -78,6 +81,11 @@ impl FlowChannelSpec {
                 .sink_payload_roots
                 .keys()
                 .all(|sink_contract_id| routes.contains_key(sink_contract_id))
+    }
+
+    /// Identifies the Source Instance that owns this Channel's ingress Queues.
+    pub(super) fn source_instance(&self) -> &str {
+        &self.source_instance
     }
 
     pub(super) const fn delivery(&self) -> SourceDelivery {

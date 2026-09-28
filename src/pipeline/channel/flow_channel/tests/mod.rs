@@ -1955,6 +1955,7 @@ fn channel_spec<'a>(
         .map(|sink_contract_id| (sink_contract_id.clone(), sink_contract.clone()))
         .collect();
     Ok(FlowChannelSpec::new(
+        "source",
         lua_source,
         ScriptVmLimits::try_new(
             NonZeroUsize::new(TEST_MEMORY_LIMIT_BYTES)

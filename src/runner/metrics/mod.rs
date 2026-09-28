@@ -53,11 +53,13 @@ impl RunnerMetrics {
         } else {
             MetricsData::default()
         };
-        let pending: Vec<_> = if metrics::catalog::includes_owner(include, "pipeline") {
+        let pending: Vec<_> = if metrics::catalog::includes_owner(include, "pipeline")
+            || metrics::catalog::includes_owner(include, "plugin")
+        {
             self.connections()
                 .values()
                 .filter_map(Weak::upgrade)
-                .filter_map(|connection| PendingCollection::start(connection, include))
+                .filter_map(|connection| PendingCollection::start(connection, include, deadline))
                 .collect()
         } else {
             Vec::new()

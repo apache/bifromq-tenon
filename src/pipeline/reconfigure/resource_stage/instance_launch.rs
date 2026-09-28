@@ -110,4 +110,22 @@ pub(super) fn build_instance_launch<'a>(
         interface,
         control,
     )
+    .with_metrics_attributes(vec![
+        crate::pipeline::plugin::metrics::attribute(
+            "tenon.pipeline.id",
+            target.document().id().as_str(),
+        ),
+        crate::pipeline::plugin::metrics::attribute(
+            "tenon.plugin.instance.id",
+            instance_id.as_str(),
+        ),
+        crate::pipeline::plugin::metrics::attribute(
+            "tenon.plugin.program.name",
+            instance.program_name().as_str(),
+        ),
+        crate::pipeline::plugin::metrics::attribute(
+            "tenon.plugin.program.version",
+            instance.program_identity().exact_version().as_str(),
+        ),
+    ])
 }

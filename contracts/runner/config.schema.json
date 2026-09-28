@@ -166,7 +166,7 @@
           "description": "Shared wait budget for one metrics request in milliseconds; omitted value is 2000."
         }
       },
-      "description": "Optional core pull metrics settings. Collection is enabled when omitted; Plugin SDKs are not instrumented."
+      "description": "Optional pull metrics settings for Runner, Pipeline, and Plugin process observations. Collection is enabled when omitted; Plugin SDKs collect CPU and RSS on request."
     }
   }
 }

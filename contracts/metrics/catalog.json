@@ -54,6 +54,20 @@
       ]
     },
     {
+      "name": "tenon.plugin.cpu",
+      "owner": "plugin",
+      "kind": "gauge",
+      "unit": "1",
+      "attributes": []
+    },
+    {
+      "name": "tenon.plugin.memory",
+      "owner": "plugin",
+      "kind": "gauge",
+      "unit": "By",
+      "attributes": []
+    },
+    {
       "name": "tenon.plugin.state",
       "owner": "pipeline",
       "kind": "gauge",
@@ -234,7 +248,8 @@
       "attributes": [
         "tenon.flow.id",
         "tenon.channel.index",
-        "tenon.queue.kind"
+        "tenon.queue.kind",
+        "tenon.plugin.instance.id"
       ],
       "attributeValues": {
         "tenon.queue.kind": [
@@ -242,18 +257,7 @@
           "completion",
           "egress"
         ]
-      },
-      "conditionalAttributes": [
-        {
-          "name": "tenon.plugin.instance.id",
-          "when": {
-            "attribute": "tenon.queue.kind",
-            "values": [
-              "egress"
-            ]
-          }
-        }
-      ]
+      }
     },
     {
       "name": "tenon.queue.capacity",
@@ -263,7 +267,8 @@
       "attributes": [
         "tenon.flow.id",
         "tenon.channel.index",
-        "tenon.queue.kind"
+        "tenon.queue.kind",
+        "tenon.plugin.instance.id"
       ],
       "attributeValues": {
         "tenon.queue.kind": [
@@ -271,18 +276,7 @@
           "completion",
           "egress"
         ]
-      },
-      "conditionalAttributes": [
-        {
-          "name": "tenon.plugin.instance.id",
-          "when": {
-            "attribute": "tenon.queue.kind",
-            "values": [
-              "egress"
-            ]
-          }
-        }
-      ]
+      }
     },
     {
       "name": "tenon.flow.waiting",

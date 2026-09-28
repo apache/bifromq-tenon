@@ -41,9 +41,9 @@ pub(super) fn resident_bytes() -> io::Result<u64> {
             &mut count,
         )
     };
-    if result != libc::KERN_SUCCESS {
+    if result != libc::KERN_SUCCESS || count != libc::MACH_TASK_BASIC_INFO_COUNT {
         return Err(io::Error::other("process RSS could not be sampled"));
     }
-    // SAFETY: Successful task_info initialized the entire requested structure.
+    // SAFETY: The successful call and exact count confirm the entire structure was written.
     Ok(unsafe { info.assume_init() }.resident_size)
 }

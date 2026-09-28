@@ -25,6 +25,7 @@ const INGRESS_RECORD_PROTO: &str = "contracts/source/ingress_record.proto";
 const EGRESS_RECORD_PROTO: &str = "contracts/sink/egress_record.proto";
 const PIPELINE_CONTROL_PROTO: &str = "contracts/core/pipeline_control.proto";
 const PLUGIN_PROCESS_CONTROL_PROTO: &str = "contracts/plugin/process_control.proto";
+const PLUGIN_PROCESS_METRICS_PROTO: &str = "contracts/plugin/process_metrics.proto";
 
 fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
@@ -32,6 +33,7 @@ fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed={EGRESS_RECORD_PROTO}");
     println!("cargo:rerun-if-changed={PIPELINE_CONTROL_PROTO}");
     println!("cargo:rerun-if-changed={PLUGIN_PROCESS_CONTROL_PROTO}");
+    println!("cargo:rerun-if-changed={PLUGIN_PROCESS_METRICS_PROTO}");
 
     let protoc = protoc_bin_vendored::protoc_bin_path().map_err(io::Error::other)?;
     let out_directory = env::var_os("OUT_DIR")
@@ -61,7 +63,7 @@ fn main() -> io::Result<()> {
     plugin_config.file_descriptor_set_path(out_directory.join("process_control_descriptor.pb"));
     tonic_prost_build::configure().compile_with_config(
         plugin_config,
-        &[PLUGIN_PROCESS_CONTROL_PROTO],
+        &[PLUGIN_PROCESS_CONTROL_PROTO, PLUGIN_PROCESS_METRICS_PROTO],
         &["contracts/plugin"],
     )
 }

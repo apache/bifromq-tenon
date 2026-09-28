@@ -35,13 +35,23 @@ under the License.
     <dependencies>
         <dependency>
             <groupId>org.apache.bifromq.tenon</groupId>
-            <artifactId>tenon-ipc</artifactId>
-            <version>${project.version}</version>
+            <artifactId>tenon-process-metrics</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-metrics</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp-common</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.bifromq.tenon</groupId>
             <artifactId>tenon-ipc</artifactId>
-            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.bifromq.tenon</groupId>
+            <artifactId>tenon-ipc</artifactId>
             <classifier>tests</classifier>
             <scope>test</scope>
         </dependency>
@@ -73,6 +83,12 @@ under the License.
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -80,7 +96,7 @@ under the License.
                 <version>${maven.shade.plugin.version}</version>
                 <executions>
                     <execution>
-                        <id>embed-internal-ipc</id>
+                        <id>embed-internal-runtime</id>
                         <phase>package</phase>
                         <goals>
                             <goal>shade</goal>
@@ -89,8 +105,15 @@ under the License.
                             <artifactSet>
                                 <includes>
                                     <include>org.apache.bifromq.tenon:tenon-ipc</include>
+                                    <include>io.opentelemetry:*</include>
                                 </includes>
                             </artifactSet>
+                            <relocations>
+                                <relocation>
+                                    <pattern>io.opentelemetry</pattern>
+                                    <shadedPattern>org.apache.bifromq.tenon.sdk.internal.otel</shadedPattern>
+                                </relocation>
+                            </relocations>
                             <filters>
                                 <filter>
                                     <artifact>org.apache.bifromq.tenon:tenon-ipc</artifact>
@@ -141,6 +164,7 @@ under the License.
                             </sourceDirectories>
                             <includes>
                                 <include>process_control.proto</include>
+                                <include>process_metrics.proto</include>
                                 <include>ingress_record.proto</include>
                                 <include>egress_record.proto</include>
                             </includes>

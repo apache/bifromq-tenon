@@ -58,14 +58,15 @@ def messages(arguments, **kwargs):
 def verify(directory):
     workspace = json.loads(run(["cargo", "metadata", "--no-deps", "--format-version=1", "--locked"]))
     packages = [next(package for package in workspace["packages"] if package["name"] == name)
-                for name in ["tenon-ipc", "tenon-plugin-sdk"]]
+                for name in ["tenon-ipc", "tenon-process-metrics", "tenon-plugin-sdk"]]
     patch = []
     for package in packages:
         # Resolve the unpublished dependency at its locked workspace path while
-        # packaging. Author projects below use only the two extracted archives.
-        package_patch = [] if package["name"] == "tenon-ipc" else [
-            "--config", f"patch.crates-io.tenon-ipc.path={json.dumps(str(Path(packages[0]['manifest_path']).parent))}"
-        ]
+        # packaging. Author projects below use only the extracted archives.
+        package_patch = []
+        for dependency in packages:
+            if dependency["name"] != package["name"]:
+                package_patch += ["--config", f"patch.crates-io.{dependency['name']}.path={json.dumps(str(Path(dependency['manifest_path']).parent))}"]
         run(["cargo", "package", "-p", package["name"], "--registry", "crates-io",
              "--locked", "--no-verify", "--allow-dirty", *package_patch])
         archive = Path(workspace["target_directory"]) / "package" / f"{package['name']}-{package['version']}.crate"
@@ -393,6 +394,7 @@ def verify_runner(runner, bundles, scenario, *, chain_programs=("source", "sink"
                                 break
                             assert time.monotonic() < deadline, pipeline
                             time.sleep(0.01)
+                    verify_plugin_metrics(request, documents)
                     pipeline_launch_ids = wait_for_pipeline_records(
                         request, documents, "drained" if scenario in ("drained", "runner-lost") else "pending")
                     if scenario not in ("drained", "runner-lost"):
@@ -580,6 +582,36 @@ def verify_rejected_uploads(request, bundle):
     print("PASS: invalid and foreign-platform uploads rejected without publishing a Program", flush=True)
 
 
+def verify_plugin_metrics(request, documents):
+    deadline = time.monotonic() + 30
+    while True:
+        status, _, body = request("GET", "/metrics?include=tenon.plugin.cpu,tenon.plugin.memory")
+        assert status == 200, (status, body)
+        observed = {}
+        for process in json.loads(body)["processes"]:
+            resource = process["resource"]
+            assert resource["service.name"] == "tenon.plugin", resource
+            identity = (resource["tenon.pipeline.id"], resource["tenon.plugin.instance.id"])
+            assert identity not in observed, "One shared owner must produce only one process snapshot"
+            metrics = {metric["name"]: metric for metric in process["metrics"]}
+            if set(metrics) != {"tenon.plugin.cpu", "tenon.plugin.memory"}:
+                continue
+            assert metrics["tenon.plugin.cpu"]["unit"] == "1"
+            assert float(metrics["tenon.plugin.cpu"]["points"][0]["value"]) >= 0
+            assert int(metrics["tenon.plugin.memory"]["points"][0]["value"]) > 0
+            assert resource["tenon.plugin.program.version"] == "0.1.0"
+            assert resource["service.instance.id"]
+            observed[identity] = resource["service.instance.id"]
+        expected = {("rust-chain", "source"), ("rust-chain", "sink"), ("rust-loop", "shared")}
+        if set(observed) == expected:
+            status, _, body = request("GET", "/metrics?format=prometheus&include=tenon.plugin.memory")
+            assert status == 200 and b"tenon_plugin_memory_bytes" in body, (status, body)
+            print("PASS: three real SDK process snapshots, shared owner counted once, plugin-only JSON and Prometheus", flush=True)
+            return
+        assert time.monotonic() < deadline, (observed, body)
+        time.sleep(0.01)
+
+
 def wait_for_pipeline_records(request, documents, completion_state):
     names = ["tenon.flow.input.records", "tenon.flow.egress.records",
              "tenon.flow.completion.records", "tenon.queue.usage"]
@@ -605,6 +637,10 @@ def wait_for_pipeline_records(request, documents, completion_state):
                         or completion[0]["attributes"]["result"] != "ok"):
                     continue
             queues = metrics.get("tenon.queue.usage", [])
+            for point in queues:
+                kind = point["attributes"]["tenon.queue.kind"]
+                expected_instance = "shared" if identity == "rust-loop" else ("sink" if kind == "egress" else "source")
+                assert point["attributes"]["tenon.plugin.instance.id"] == expected_instance
             if (len(queues) == 3
                     and {point["attributes"]["tenon.queue.kind"] for point in queues}
                     == {"submission", "completion", "egress"}

@@ -413,6 +413,7 @@ async fn stdin_eof_makes_the_real_plugin_exit_without_shutdown() -> Result<(), B
         launcher.socket_path(),
         &launch_id,
         diagnostics(),
+        launcher.register_metrics(&launch_id, vec![]),
     )
     else {
         return Err(io::Error::other("Controlled child did not spawn").into());

@@ -89,7 +89,7 @@ Use `:` for method calls. Receivers must belong to the same exact registry bindi
 
 `emit()` with no arguments produces no Sink record and establishes a completion boundary. `emit(nil)` is an error. Output is allowed only during `main` or its helpers, not at top level. One invocation may emit zero or more times. Each successful emit is accepted in order; permanent record-size rejection happens before acceptance with `egress.record_too_large`. If a Sink cannot accept output yet, the channel waits; other channels continue.
 
-With at-least-once delivery, the first successful emit completes the pending Source group once all matching Sinks report success. A zero-argument emit completes the group without Sink output. Subsequent emits are separate outputs and cannot bypass, extend or roll back the first group's completion. See [delivery semantics](tenon-document.md#completion-and-delivery) and the [SDK contract](../sdk/SDK-impl-contract.md) for terminal outcomes.
+With at-least-once delivery, the first successful emit completes the pending Source group once all matching Sinks report success. A zero-argument emit completes the group without Sink output. Subsequent emits are separate outputs and cannot bypass, extend or roll back the first group's completion. See [delivery semantics](tenon-document.md#completion-and-delivery) and the [SDK contract](../sdk/plugin-sdk-contract.md) for terminal outcomes.
 
 Registry lookup, Builder receiver/argument/type/range errors and timer argument errors are ordinary Lua errors catchable with `pcall`. Resource-limit failures and sandbox violations are not recoverable inside the invalidated VM.
 

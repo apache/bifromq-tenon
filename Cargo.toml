@@ -89,7 +89,7 @@ name = "runner_extensions"
 required-features = ["repository-test-support"]
 
 [workspace]
-members = [".", "ipc/rust/tenon-ipc", "sdk/rust/plugin-sdk", "plugin/bifromq-tenon-mqtt-plugin", "plugin/bifromq-tenon-dummy-source-plugin", "plugin/bifromq-tenon-stdout-sink-plugin"]
+members = [".", "ipc/rust/tenon-ipc", "sdk/rust/plugin-sdk", "sdk/rust/process-metrics", "plugin/bifromq-tenon-mqtt-plugin", "plugin/bifromq-tenon-dummy-source-plugin", "plugin/bifromq-tenon-stdout-sink-plugin"]
 resolver = "3"
 
 [workspace.package]
@@ -104,6 +104,7 @@ publish = false
 debug = "line-tables-only"
 
 [workspace.dependencies]
+tenon-process-metrics = { path = "sdk/rust/process-metrics", version = "=0.1.0" }
 tenon-ipc = { path = "ipc/rust/tenon-ipc", version = "=0.1.0" }
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base64 = { version = "=0.23.0", default-features = false, features = ["std"] }
@@ -174,6 +175,7 @@ broken_intra_doc_links = "deny"
 workspace = true
 
 [dependencies]
+tenon-process-metrics.workspace = true
 tenon-ipc.workspace = true
 axum.workspace = true
 base64.workspace = true

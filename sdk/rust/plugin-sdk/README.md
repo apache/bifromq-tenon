@@ -176,6 +176,10 @@ Final shutdown preserves results already read, fails remaining requests, and cal
 
 Factory, lifecycle, queue, write and shutdown failures are reported on stderr and exit the process with code 1. Panics on business threads do the same. Neither `run` nor `await_shutdown` returns an error to the author. Dropping a Program before shutdown completes also exits with failure. Do not depend on later callbacks or destructors after a failure; use these entrypoints in a process dedicated to the plugin.
 
+## Built-in process observations
+
+To implement the SDK process-metrics contract, this SDK automatically reports this Plugin process's CPU consumption (`tenon.plugin.cpu`, logical cores) and current RSS (`tenon.plugin.memory`, bytes) when the Runner receives a metrics request. A combined Source-and-Sink owner reports one process. The first CPU observation is absent while its baseline is established; missing observations are never zero. Authors do not add instrumentation or a collector. Lifecycle and Queue operations are independent of metrics collection. The reusable `tenon-process-metrics` crate supplies OS observations to both core and this SDK; IPC primitives remain independent of metrics.
+
 ## Payload contracts, packaging, and testing
 
 Your `config.schema.json` describes the complete instance configuration; Tenon validates it before passing the value to the factory. Check business requirements that a schema cannot express, such as opening a device or authenticating to a service, in your factory or a business worker; lifecycle callbacks must not wait for external progress.

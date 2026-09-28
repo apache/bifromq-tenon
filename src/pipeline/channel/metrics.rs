@@ -131,17 +131,17 @@ impl ChannelMetrics {
     pub(crate) fn queue(
         &self,
         kind: &'static str,
+        source: &str,
         queue: QueueObserver,
     ) -> Option<Arc<QueueMetric>> {
         self.observation.as_ref().map(|channel| {
-            channel.flow.instruments.queues.register(
-                vec![
-                    channel.attributes[0].clone(),
-                    channel.attributes[1].clone(),
-                    KeyValue::new("tenon.queue.kind", kind),
-                ],
-                queue,
-            )
+            let mut attributes = vec![
+                channel.attributes[0].clone(),
+                channel.attributes[1].clone(),
+                KeyValue::new("tenon.queue.kind", kind),
+            ];
+            attributes.push(KeyValue::new("tenon.plugin.instance.id", source.to_owned()));
+            channel.flow.instruments.queues.register(attributes, queue)
         })
     }
 

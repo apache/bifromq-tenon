@@ -29,19 +29,28 @@ mod platform;
 #[path = "macos.rs"]
 mod platform;
 
-#[derive(Default)]
-pub(super) struct ProcessSampler {
+#[derive(Debug, Default)]
+/// CPU baseline owned by one process collector.
+pub struct ProcessSampler {
     // This is the previous successful sample, not a projection of current state.
     previous: Option<(ProcessTime, Instant)>,
 }
 
 impl ProcessSampler {
-    pub(super) fn cpu(&mut self) -> Option<f64> {
-        self.observe(ProcessTime::try_now().ok(), Instant::now())
+    /// Reads CPU cores since the last successful sample.
+    /// Returns an error when the operating system cannot read the process clock.
+    pub fn cpu(&mut self) -> std::io::Result<Option<f64>> {
+        Ok(self.observe(Some(ProcessTime::try_now()?), Instant::now()))
     }
 
     fn observe(&mut self, cpu: Option<ProcessTime>, now: Instant) -> Option<f64> {
         let cpu = cpu?;
+        if self
+            .previous
+            .is_some_and(|(_, previous_at)| now <= previous_at)
+        {
+            return None;
+        }
         self.previous
             .replace((cpu, now))
             .map(|(previous_cpu, previous_at)| {
@@ -51,7 +60,8 @@ impl ProcessSampler {
     }
 }
 
-pub(super) fn memory() -> std::io::Result<u64> {
+/// Reads current own-process RSS in bytes.
+pub fn memory() -> std::io::Result<u64> {
     platform::resident_bytes()
 }
 

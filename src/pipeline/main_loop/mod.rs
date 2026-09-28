@@ -277,14 +277,23 @@ async fn bootstrap(
         },
     )
     .expect("Pipeline metrics use the existing launch identity without randomness");
-    let metrics = PipelineMetrics::start(metrics, &launch.control_socket, launch.launch_id.clone());
+    let metrics = PipelineMetrics::start(
+        metrics,
+        &launch.control_socket,
+        launch.launch_id.clone(),
+        plugin_control.process_metrics(),
+    );
     let meter = metrics.meter();
     let diagnostics = PipelineDiagnostics::start(channel, launch.launch_id);
+    let launcher = plugin_control
+        .launcher()
+        .with_node_id(environment.metrics_node_id.clone())
+        .with_metrics(Some(&meter));
     let controller = start_controller(
         revision,
         environment,
         diagnostics.publisher(),
-        plugin_control.launcher().with_metrics(Some(&meter)),
+        launcher,
         Some(&meter),
     );
     let observations = PluginMetrics::new(&meter);

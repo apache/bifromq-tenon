@@ -38,6 +38,7 @@ final class PluginProgramRuntime {
   private final Path workingDirectory;
   private final JsonNode config;
   private final PluginControlConnection control;
+  private PluginMetricsConnection metrics;
   private Phase phase = Phase.ATTACHED;
 
   private PluginProgramRuntime(
@@ -90,7 +91,13 @@ final class PluginProgramRuntime {
         .daemon(true)
         .name("tenon-plugin-owner-lifetime")
         .start(PluginProgramRuntime::watchOwnerLifetime);
-    return new PluginProgramRuntime(startup.workingDirectory(), startup.config(), control);
+    var runtime = new PluginProgramRuntime(startup.workingDirectory(), startup.config(), control);
+    try {
+      runtime.metrics = PluginMetricsConnection.open(startup.controlSocket(), startup.launchId());
+    } catch (RuntimeException | LinkageError failure) {
+      System.err.println("Plugin metrics unavailable: " + failure);
+    }
+    return runtime;
   }
 
   /** Returns the absolute Instance working directory supplied by Pipeline. */
@@ -139,6 +146,7 @@ final class PluginProgramRuntime {
     if (!command.hasShutdown()) {
       throw new IOException("Plugin lifecycle expected Shutdown");
     }
+    if (metrics != null) metrics.close();
     phase = Phase.SHUTTING_DOWN;
   }
 

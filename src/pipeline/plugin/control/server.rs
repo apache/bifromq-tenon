@@ -35,6 +35,7 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
+use super::super::metrics::PluginProcessMetrics;
 use super::adapter::PluginControlAdapter;
 use super::launch_registry::{PendingPluginControl, PluginControlLaunchRegistry};
 use crate::payload_contract::PluginInterface;
@@ -58,7 +59,10 @@ impl PluginControlServer {
         let listener =
             UnixListener::bind(&socket_path).map_err(PluginControlServerError::SocketBind)?;
         let service = PluginControlAdapter::new(launches.clone()).into_service();
+        let metrics = PluginProcessMetrics::default();
         let launcher = PluginControlLauncher {
+            metrics: metrics.clone(),
+            node_id: None,
             launches,
             socket_path: Arc::new(socket_path),
             restarts: None,
@@ -67,6 +71,7 @@ impl PluginControlServer {
         let task = tokio::spawn(
             Server::builder()
                 .add_service(service)
+                .add_service(metrics.into_service())
                 .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
                     let _ = shutdown_requested.await;
                 }),
@@ -79,6 +84,10 @@ impl PluginControlServer {
     }
 
     /// Returns the cloneable launch capability without transferring server ownership.
+    pub(in crate::pipeline) fn process_metrics(&self) -> PluginProcessMetrics {
+        self.launcher.metrics.clone()
+    }
+
     pub(in crate::pipeline) fn launcher(&self) -> PluginControlLauncher {
         self.launcher.clone()
     }
@@ -125,6 +134,8 @@ impl fmt::Debug for PluginControlServer {
 /// Cloneable authority for registering children against one still-owned server.
 #[derive(Clone)]
 pub(in crate::pipeline) struct PluginControlLauncher {
+    metrics: PluginProcessMetrics,
+    node_id: Option<String>,
     launches: PluginControlLaunchRegistry,
     // This immutable path is shared because child owners outlive the borrow used
     // to create them while the server retains the actual socket resource owner.
@@ -133,6 +144,21 @@ pub(in crate::pipeline) struct PluginControlLauncher {
 }
 
 impl PluginControlLauncher {
+    pub(in crate::pipeline) fn with_node_id(mut self, node_id: Option<String>) -> Self {
+        self.node_id = node_id;
+        self
+    }
+    pub(in crate::pipeline::plugin) fn register_metrics(
+        &self,
+        launch: &[u8],
+        mut attributes: Vec<opentelemetry_proto::tonic::common::v1::KeyValue>,
+    ) -> super::super::metrics::Registration {
+        if let Some(node) = &self.node_id {
+            attributes.push(super::super::metrics::attribute("tenon.node.id", node));
+        }
+        self.metrics.register(launch, attributes)
+    }
+
     pub(in crate::pipeline) fn with_metrics(mut self, meter: Option<&Meter>) -> Self {
         self.restarts = meter.map(|meter| {
             meter

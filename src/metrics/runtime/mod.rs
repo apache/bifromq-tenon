@@ -179,7 +179,7 @@ fn register_process_metrics(meter: &Meter, process: CoreProcess<'_>) {
         .f64_observable_gauge(cpu_name)
         .with_unit("1")
         .with_callback(move |observer| {
-            if let Some(value) = sampler.lock().expect("CPU sampler poisoned").cpu() {
+            if let Ok(Some(value)) = sampler.lock().expect("CPU sampler poisoned").cpu() {
                 observer.observe(value, &[]);
             }
         })

@@ -2371,6 +2371,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tenon-ipc",
+ "tenon-process-metrics",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -2409,6 +2410,9 @@ dependencies = [
  "hyper-util",
  "jsonc-parser",
  "loom",
+ "opentelemetry",
+ "opentelemetry-proto",
+ "opentelemetry_sdk",
  "proptest",
  "prost",
  "prost-build",
@@ -2420,12 +2424,21 @@ dependencies = [
  "sha2",
  "tempfile",
  "tenon-ipc",
+ "tenon-process-metrics",
  "tokio",
  "tokio-stream",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
  "tower",
+]
+
+[[package]]
+name = "tenon-process-metrics"
+version = "0.1.0"
+dependencies = [
+ "cpu-time",
+ "libc",
 ]
 
 [[package]]

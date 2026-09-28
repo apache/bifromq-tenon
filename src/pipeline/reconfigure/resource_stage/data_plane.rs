@@ -76,6 +76,7 @@ pub(in crate::pipeline::reconfigure) fn channel_spec(
         })
         .collect();
     FlowChannelSpec::new(
+        flow.source().as_str(),
         flow.lua_source(),
         limits,
         flow.max_record_bytes(),

@@ -181,6 +181,7 @@ fn program_channel_spec(
         .sink_root_message()
         .expect("the validated Sink Program has a Sink root");
     Ok(FlowChannelSpec::new(
+        "source",
         lua_source,
         ScriptVmLimits::try_new(
             NonZeroUsize::new(TEST_MEMORY_LIMIT_BYTES).expect("the test memory limit is positive"),

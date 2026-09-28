@@ -968,7 +968,9 @@ impl FlowChannel {
             .ingress
             .observers()
             .into_iter()
-            .filter_map(|(kind, queue)| self.metrics.queue(kind, queue));
+            .filter_map(|(kind, queue)| {
+                self.metrics.queue(kind, self.spec.source_instance(), queue)
+            });
         let egress = self
             .routes
             .values()

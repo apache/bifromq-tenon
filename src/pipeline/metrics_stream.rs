@@ -19,8 +19,10 @@
 
 //! Owns the private provider and the reconnecting, request-driven metrics stream.
 
+use super::plugin::metrics::PluginProcessMetrics;
 use crate::contracts::core;
 use crate::metrics::MetricsRuntime;
+use crate::time::Deadline;
 use opentelemetry::metrics::Meter;
 use prost::Message as _;
 use std::sync::Arc;
@@ -42,7 +44,12 @@ impl PipelineMetrics {
         clippy::expect_used,
         reason = "Runner supplies the exact private socket address"
     )]
-    pub(super) fn start(runtime: MetricsRuntime, socket: &str, launch_id: Vec<u8>) -> Self {
+    pub(super) fn start(
+        runtime: MetricsRuntime,
+        socket: &str,
+        launch_id: Vec<u8>,
+        plugins: PluginProcessMetrics,
+    ) -> Self {
         let runtime = Arc::new(runtime);
         let collector = Arc::clone(&runtime);
         let endpoint = Endpoint::from_shared(format!("unix://{socket}"))
@@ -51,7 +58,7 @@ impl PipelineMetrics {
         task.spawn(async move {
             loop {
                 if let Ok(channel) = endpoint.connect().await {
-                    let _disconnected = serve(channel, &launch_id, &collector).await;
+                    let _disconnected = serve(channel, &launch_id, &collector, &plugins).await;
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
@@ -77,7 +84,12 @@ impl PipelineMetrics {
     }
 }
 
-async fn serve(channel: Channel, launch_id: &[u8], runtime: &MetricsRuntime) -> Result<(), Status> {
+async fn serve(
+    channel: Channel,
+    launch_id: &[u8],
+    runtime: &MetricsRuntime,
+    plugins: &PluginProcessMetrics,
+) -> Result<(), Status> {
     let mut client = core::pipeline_metrics_client::PipelineMetricsClient::new(channel)
         .max_decoding_message_size(usize::MAX)
         .max_encoding_message_size(usize::MAX);
@@ -94,7 +106,19 @@ async fn serve(channel: Channel, launch_id: &[u8], runtime: &MetricsRuntime) -> 
         .await?
         .into_inner();
     while let Some(request) = requests.message().await? {
-        let snapshot = runtime.collect(&request.include);
+        let deadline = Deadline::start(Duration::from_millis(request.remaining_timeout_ms / 2));
+        let mut snapshot = runtime.collect(&request.include);
+        let collected = tokio::select! {
+            biased;
+            closed = requests.message() => {
+                return match closed? {
+                    None => Ok(()),
+                    Some(_) => Err(Status::invalid_argument("Only one collection may be in flight")),
+                };
+            }
+            collected = plugins.collect(&request.include, deadline) => collected,
+        };
+        snapshot.resource_metrics.extend(collected.resource_metrics);
         snapshots
             .send(core::PipelineMetricsToRunner {
                 message: Some(core::pipeline_metrics_to_runner::Message::Snapshot(

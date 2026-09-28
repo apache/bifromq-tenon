@@ -192,6 +192,7 @@ pub async fn run_sink_program_with_control_stream_loss(
         launcher.socket_path(),
         pending.launch_id(),
         publisher,
+        launcher.register_metrics(pending.launch_id(), vec![]),
     );
     let operation = match spawned {
         PluginSpawnOutcome::Started {

@@ -48,6 +48,12 @@ impl Deadline {
         )
     }
 
+    /// The remaining request budget without extending its deadline.
+    pub(crate) fn remaining(self) -> Duration {
+        self.timeout
+            .saturating_sub(Instant::now().saturating_duration_since(self.started_at))
+    }
+
     /// Tests the same absolute budget without constructing or polling a timer.
     pub(crate) fn has_elapsed(self) -> bool {
         Instant::now().duration_since(self.started_at) >= self.timeout

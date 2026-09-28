@@ -85,3 +85,5 @@ impl Error for PluginInstanceError {
 pub(in crate::pipeline) mod test_support;
 
 pub(in crate::pipeline) use controlled_lifecycle::HandoffReadiness;
+
+pub(in crate::pipeline) mod metrics;

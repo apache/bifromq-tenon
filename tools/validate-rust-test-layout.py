@@ -28,6 +28,7 @@ import sys
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_ROOTS = [REPOSITORY_ROOT / "src",
                 REPOSITORY_ROOT / "ipc/rust/tenon-ipc/src",
+                REPOSITORY_ROOT / "sdk/rust/process-metrics/src",
                 REPOSITORY_ROOT / "sdk/rust/plugin-sdk/src",
                 REPOSITORY_ROOT / "sdk/rust/cargo-tenon/src"]
 ALLOWED_TEST_MODULE = re.compile(

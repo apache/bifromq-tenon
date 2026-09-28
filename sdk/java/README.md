@@ -21,7 +21,7 @@ under the License.
 
 Tenon is part of Apache BifroMQ (Incubating). See the [incubation disclaimer](../../DISCLAIMER).
 
-Use `tenon-plugin-sdk` to write Source, Sink or combined plugins, `tenon-plugin-archetype` to generate a project, and `tenon-maven-plugin` to package it. The generated README describes the callbacks and files to customize. The [SDK implementation contract](../SDK-impl-contract.md) is for developers adding or maintaining a language SDK.
+Use `tenon-plugin-sdk` to write Source, Sink or combined plugins, `tenon-plugin-archetype` to generate a project, and `tenon-maven-plugin` to package it. The generated README describes the callbacks and files to customize. The [SDK implementation contract](../plugin-sdk-contract.md) is for developers adding or maintaining a language SDK.
 
 ## Build from source
 
@@ -68,13 +68,25 @@ An invalid channel throws `IllegalArgumentException`. A closed session completes
 
 Sink `write` receives a nonempty, ordered, immutable batch and returns `CompletionStage<Void>`. Calls do not overlap, but returned stages can finish out of order. Return promptly and complete the stage successfully only when every record reaches your downstream delivery guarantee. A failed stage terminates the plugin; a restart can replay unacknowledged batches, including partial external effects. Plan for duplicates.
 
+## Combined Programs
+
+A combined Program may be bound as Source only, Sink only, or both. The SDK creates only the sessions represented by the current Flow bindings. Its factory receives `Optional<Ingress<S>>` for the bound Source direction and the actual `Set<FlowChannel>` Sink inputs. `FlowChannel` contains only `flowId` and `channelId`.
+
+Unbound directions do not create workers.
+
+## Built-in process observations
+
+To implement the SDK process-metrics contract, this SDK automatically reports this Plugin process's CPU consumption (`tenon.plugin.cpu`, logical cores) and current RSS (`tenon.plugin.memory`, bytes) when the Runner receives a metrics request. A combined Source-and-Sink owner reports one process. The first CPU observation is absent while its baseline is established; missing observations are never zero. Authors do not add instrumentation or a collector. Lifecycle and Queue operations are independent of metrics collection.
+
+The SDK depends on the reusable `org.apache.bifromq.tenon:tenon-process-metrics` artifact under `sdk/java/process-metrics` and pins and shades its private OpenTelemetry API, SDK and binary converter. The [process-metrics contract](../process-metrics.md) defines CPU/RSS sampling; the library can also be used independently. It uses a separate gRPC channel with asynchronous callbacks and scheduled stream reconnection; it does not register a global provider or expose OTel types to Plugin authors.
+
 ## Packaging
 
 The generated POM configures `tenon-maven-plugin` to create a standard `.tar.gz` under `target/`. The normal package contains a native launcher and its own fixed Java runtime, so it does not need a system JVM on the Runner host. Build and test the bundle on each target platform you support.
 
 The package contains `manifest.json`, `config.schema.json`, `payload.descriptor.pb`, program dependencies and retained license material. Descriptor generation is a required build output. Runtime distribution notices remain under `runtime/`; preserve them when redistributing. Install through the [normal Runner API](../../guide/plugins.md), not by writing its private state tree.
 
-Set the required `tenon.displayName` and `tenon.description` properties in the generated POM before distributing the plugin. They become the manifest's `displayName` and `description`, which Console displays. Names allow 1-80 Unicode code points on one line; descriptions allow 1-1024 and may contain line breaks. Both require non-whitespace plain text. The bundler validates the complete manifest using the shared Schema and preserves these values without defaults or truncation. See the [packaging-tool contract](../SDK-impl-contract.md#11-packaging-tools-and-generated-projects).
+Set the required `tenon.displayName` and `tenon.description` properties in the generated POM before distributing the plugin. They become the manifest's `displayName` and `description`, which Console displays. Names allow 1-80 Unicode code points on one line; descriptions allow 1-1024 and may contain line breaks. Both require non-whitespace plain text. The bundler validates the complete manifest using the shared Schema and preserves these values without defaults or truncation. See the [packaging-tool contract](../plugin-sdk-contract.md#11-packaging-tools-and-generated-projects).
 
 ## Verification
 
@@ -88,7 +100,3 @@ yourself. The bundler includes either project file when you provide it; it alway
 preserves the third-party runtime's legal files and dependency JARs. Review all
 bundled components before distributing your plugin. Tenon's own Maven artifacts
 carry their Apache LICENSE, NOTICE and incubation DISCLAIMER under META-INF.
-
-## Combined Programs
-
-A combined Program may be bound as Source only, Sink only, or both. The SDK creates only the sessions represented by the current Flow bindings. Its factory receives `Optional<Ingress<S>>` for the bound Source direction and the actual `Set<FlowChannel>` Sink inputs. `FlowChannel` contains only `flowId` and `channelId`.

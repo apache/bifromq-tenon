@@ -47,12 +47,21 @@ type ReadyFuture =
 
 /// Target launch material for one UDS-controlled Plugin Instance.
 pub(in crate::pipeline) struct ControlledPluginLaunch<'a> {
+    pub(super) metrics_attributes: Vec<opentelemetry_proto::tonic::common::v1::KeyValue>,
     pub(super) process: PluginLaunch<'a>,
     pub(super) interface: PluginInterface,
     pub(in crate::pipeline::plugin) control: &'a PluginControlLauncher,
 }
 
 impl<'a> ControlledPluginLaunch<'a> {
+    pub(in crate::pipeline) fn with_metrics_attributes(
+        mut self,
+        attributes: Vec<opentelemetry_proto::tonic::common::v1::KeyValue>,
+    ) -> Self {
+        self.metrics_attributes = attributes;
+        self
+    }
+
     /// Combines process material with this launch's bound interfaces and control endpoint.
     pub(in crate::pipeline) const fn new(
         process: PluginLaunch<'a>,
@@ -60,6 +69,7 @@ impl<'a> ControlledPluginLaunch<'a> {
         control: &'a PluginControlLauncher,
     ) -> Self {
         Self {
+            metrics_attributes: Vec::new(),
             process,
             interface,
             control,

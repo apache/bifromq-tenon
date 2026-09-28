@@ -84,6 +84,7 @@ pub(super) fn run_dual_interface_routes(bundle: &[u8]) -> io::Result<()> {
             .all(|instance| instance["state"] == "running")
             .then_some(()))
     })?;
+    verify_java_process_resources(address, &["A", "B"])?;
     runner.terminate()?;
     assert_eq!(messages(&output_a)?, ["from-A", "from-B"]);
     assert_eq!(messages(&output_b)?, ["from-A"]);

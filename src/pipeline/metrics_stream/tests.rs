@@ -52,7 +52,12 @@ async fn reconnect_preserves_accumulation_and_shutdown_closes_the_idle_stream() 
         .meter()
         .u64_counter("tenon.flow.input.records")
         .build();
-    let metrics = PipelineMetrics::start(runtime, &socket.to_string_lossy(), b"launch-a".to_vec());
+    let metrics = PipelineMetrics::start(
+        runtime,
+        &socket.to_string_lossy(),
+        b"launch-a".to_vec(),
+        PluginProcessMetrics::default(),
+    );
     tokio::time::timeout(Duration::from_secs(5), async {
         for expected in [1, 2] {
             let mut peer = connected
@@ -69,6 +74,7 @@ async fn reconnect_preserves_accumulation_and_shutdown_closes_the_idle_stream() 
             peer.requests
                 .send(Ok(core::RunnerToPipelineMetrics {
                     include: vec!["tenon.flow.input.records".to_owned()],
+                    remaining_timeout_ms: 1000,
                 }))
                 .await
                 .map_err(io::Error::other)?;

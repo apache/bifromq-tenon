@@ -19,6 +19,7 @@
 
 use super::{PluginSpawnOutcome, spawn_plugin};
 use crate::pipeline::diagnostics::test_support as diagnostic_test_support;
+use crate::pipeline::plugin::metrics::PluginProcessMetrics;
 use crate::pipeline::plugin::test_support::{TEST_DEADLINE, TestLaunch, wait_for_file};
 use crate::tenon_document::verified::{ExtraArgs, ExtraArgsPosition};
 use serde_json::json;
@@ -70,6 +71,7 @@ async fn launch_applies_instance_arguments_and_environment_without_shell_expansi
             &[1; 16],
             diagnostic_test_support::publisher()
                 .instance_plugin(diagnostic_test_support::plugin_id()),
+            PluginProcessMetrics::default().register(&[1; 16], vec![]),
         )
         else {
             return Err(io::Error::other("Plugin did not spawn").into());
@@ -152,6 +154,7 @@ while IFS= read -r ignored; do :; done
         &root.path().join("unused-control.sock"),
         &[1; 16],
         diagnostics,
+        PluginProcessMetrics::default().register(&[1; 16], vec![]),
     )
     else {
         return Err(io::Error::other("Output-drain child did not spawn").into());
@@ -200,6 +203,7 @@ while IFS= read -r ignored; do :; done
         &root.path().join("unused-control.sock"),
         &[1; 16],
         diagnostics,
+        PluginProcessMetrics::default().register(&[1; 16], vec![]),
     )
     else {
         return Err(io::Error::other("Config-writer child did not spawn").into());

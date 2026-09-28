@@ -85,7 +85,7 @@ Document validation checks structure and supported semantics; it does not establ
 
 Protect runtime directories from other users. Local process communication does not isolate a plugin from other processes running under the same OS identity.
 
-See [package rules](guide/plugins.md) for installation requirements. SDK developers should also follow the [SDK implementation contract](sdk/SDK-impl-contract.md).
+See [package rules](guide/plugins.md) for installation requirements. SDK developers should also follow the [SDK implementation contract](sdk/plugin-sdk-contract.md).
 
 ## Lua and resource boundaries
 

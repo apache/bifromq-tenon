@@ -34,11 +34,11 @@ Source Plugin → Flow Channel / Lua → Sink Plugin
           processes, packages and diagnostics
 ```
 
-Write plugins in Rust or Java using the SDKs and project scaffolds. Start with the [plugin development guide](guide/plugins.md). Developers adding a language SDK and scaffold should use the [SDK implementation contract](sdk/SDK-impl-contract.md).
+Write plugins in Rust or Java using the SDKs and project scaffolds. Start with the [plugin development guide](guide/plugins.md). Developers adding a language SDK and scaffold should use the [SDK implementation contract](sdk/plugin-sdk-contract.md).
 
 Plugins run in separate processes. A plugin can implement Source, Sink, or both interfaces; both interfaces share one process and configuration when they belong to the same instance.
 
-This repository contains the Runner, IPC implementations, SDKs, plugin generators, and an MQTT plugin.
+This repository contains the Runner, IPC implementations, language SDKs (including reusable process-metrics libraries), plugin generators, and an MQTT plugin.
 
 ## Build and try
 
@@ -76,8 +76,9 @@ Management write access grants control over executable workloads. The default Ru
 - [Plugin packaging and development](guide/plugins.md)
 - [Metrics and live diagnostics](guide/observability.md)
 - [Runner extension interfaces](guide/runner-extensions.md)
-- [Developing a language SDK and scaffold](sdk/SDK-impl-contract.md)
+- [Developing a language SDK and scaffold](sdk/plugin-sdk-contract.md)
 - [IPC protocol for SDK developers](ipc/README.md)
+- [Process sampling contract and language implementations](sdk/process-metrics.md)
 - [Contributing and verification](CONTRIBUTING.md)
 
 Machine-readable schemas and shared test vectors live in [contracts/](contracts/). The running binary serves its own API description at `/openapi.json` and its Document Schema at `/document-schema`.

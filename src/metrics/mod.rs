@@ -17,14 +17,14 @@
  * under the License.
  */
 
-//! Collects and presents observations owned by Runner and Pipeline processes.
+//! Collects and presents observations owned by Tenon processes.
 //!
 //! Startup configuration is frozen before business resources are created.
-//! Plugin processes and language SDKs never participate in this module.
+//! Plugin snapshots arrive through their independent SDK metrics streams.
 
 pub(crate) mod catalog;
 pub(crate) mod observations;
-mod process;
+use tenon_process_metrics as process;
 pub(crate) mod queue;
 mod runtime;
 

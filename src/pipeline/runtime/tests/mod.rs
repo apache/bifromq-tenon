@@ -1737,6 +1737,7 @@ fn channel_spec<'a>(
     let memory_limit = NonZeroUsize::new(TEST_MEMORY_LIMIT_BYTES)
         .ok_or_else(|| io::Error::other("Lua memory limit must be positive"))?;
     Ok(FlowChannelSpec::new(
+        "source",
         lua_source,
         ScriptVmLimits::try_new(memory_limit, TEST_CPU_TIME_LIMIT).map_err(io::Error::other)?,
         std::num::NonZeroU64::new(262_144)

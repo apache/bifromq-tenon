@@ -653,6 +653,9 @@ impl Peer {
                 .add_service(plugin::plugin_lifecycle_server::PluginLifecycleServer::new(
                     Server { connections },
                 ))
+                .add_service(plugin::plugin_metrics_server::PluginMetricsServer::new(
+                    IdleMetrics,
+                ))
                 .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
                     let _ = stopped.await;
                 }),
@@ -785,6 +788,36 @@ enum Program {
     Source(QueueOccupancy),
     Sink(Channels),
     SourceAndSink(Channels),
+}
+
+/// Lifecycle fixtures accept the current metrics protocol without requesting samples.
+struct IdleMetrics;
+
+#[tonic::async_trait]
+impl plugin::plugin_metrics_server::PluginMetrics for IdleMetrics {
+    type StreamStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<plugin::PipelineToPluginMetrics, Status>> + Send,
+        >,
+    >;
+
+    async fn stream(
+        &self,
+        request: Request<Streaming<plugin::PluginToPipelineMetrics>>,
+    ) -> Result<Response<Self::StreamStream>, Status> {
+        let mut incoming = request.into_inner();
+        let attach = incoming
+            .message()
+            .await?
+            .ok_or_else(|| Status::invalid_argument("Metrics Attach missing"))?;
+        assert!(matches!(
+            attach.message,
+            Some(plugin::plugin_to_pipeline_metrics::Message::Attach(_))
+        ));
+        Ok(Response::new(Box::pin(
+            tokio_stream::StreamExt::filter_map(incoming, |_| None),
+        )))
+    }
 }
 
 pub(super) fn sink_binary() -> std::ffi::OsString {

@@ -28,6 +28,7 @@
     reason = "Owned channels, locks and threads cannot disappear without an SDK bug"
 )]
 
+mod metrics;
 pub(crate) mod startup;
 
 use crate::Error;
@@ -42,7 +43,7 @@ use std::thread::{self, JoinHandle};
 use tokio::io::unix::AsyncFd;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc as asynchronous;
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Endpoint;
 
@@ -81,13 +82,16 @@ impl ControlConnection {
                 let result = runtime.block_on(async {
                     let input = AsyncFd::new(input)?;
                     let executor = TrackedExecutor::default();
+                    let mut metrics = JoinSet::new();
+                    let stop_metrics = metrics.spawn(metrics::run(path.clone(), launch_id.clone(), executor.clone()));
                     let result = tokio::select! {
                         biased;
                         result = watch_stdin(input) => result,
                         result = control_session(
-                            path, launch_id, lifecycle, receiver, events, attached, executor.clone()
+                            path, launch_id, lifecycle, receiver, events, attached, executor.clone(), stop_metrics
                         ) => result,
                     };
+                    metrics.shutdown().await;
                     executor.stop().await;
                     result
                 });
@@ -188,10 +192,10 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     fn execute(&self, future: F) {
-        self.0
-            .lock()
-            .expect("task registry must not panic")
-            .spawn(future);
+        let mut workers = self.0.lock().expect("task registry must not panic");
+        // Reconnecting transports must not retain completed task records until shutdown.
+        while workers.try_join_next().is_some() {}
+        workers.spawn(future);
     }
 }
 
@@ -204,6 +208,10 @@ enum Phase {
     Closing,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one worker owns control, metrics cancellation, and lifecycle publication"
+)]
 async fn control_session(
     path: std::path::PathBuf,
     launch_id: Vec<u8>,
@@ -212,6 +220,7 @@ async fn control_session(
     events: mpsc::Sender<Event>,
     attached: mpsc::SyncSender<()>,
     executor: TrackedExecutor,
+    stop_metrics: AbortHandle,
 ) -> Result<(), Error> {
     let channel = Endpoint::from_static("http://[::]:50051")
         .executor(executor)
@@ -245,10 +254,12 @@ async fn control_session(
                     }
                     (Some(pipeline_to_plugin::Message::Shutdown(_)), Phase::Ready) if lifecycle == Lifecycle::SinkOnly => {
                         phase = Phase::Closing;
+                        stop_metrics.abort();
                         events.send(Event::Shutdown).expect("business owner must remain alive");
                     }
                     (Some(pipeline_to_plugin::Message::Shutdown(_)), Phase::Quiesced) => {
                         phase = Phase::Closing;
+                        stop_metrics.abort();
                         events.send(Event::Shutdown).expect("business owner must remain alive");
                     }
                     _ => return Err("Unexpected Plugin lifecycle command or stream termination".into()),

@@ -21,7 +21,7 @@ under the License.
 
 Tenon is part of Apache BifroMQ (Incubating). See the [incubation disclaimer](../DISCLAIMER).
 
-Use this reference when implementing IPC for a Tenon Plugin SDK in a new language or maintaining an existing SDK. It specifies Queue v1 and Bell Region v1 file formats, memory ordering, endpoint lifetime and failure behavior required for interoperability. The [SDK implementation contract](../sdk/SDK-impl-contract.md) covers startup, Source/Sink adapters and scaffolding. To develop a plugin with an existing SDK, start with the [plugin development guide](../guide/plugins.md#sdks-and-generators).
+Use this reference when implementing IPC for a Tenon Plugin SDK in a new language or maintaining an existing SDK. It specifies Queue v1 and Bell Region v1 file formats, memory ordering, endpoint lifetime and failure behavior required for interoperability. The [SDK implementation contract](../sdk/plugin-sdk-contract.md) covers startup, Source/Sink adapters and scaffolding. To develop a plugin with an existing SDK, start with the [plugin development guide](../guide/plugins.md#sdks-and-generators).
 
 A Queue transports bounded, non-overwriting, single-producer/single-consumer (SPSC) framed bytes through a shared memory-mapped file. A Bell is a coalescing notification that asks one waiting loop to recheck its conditions. Queue positions and the caller's local state establish facts; notifications do not.
 
@@ -36,7 +36,7 @@ IPC owns file validation, frame planning, mappings, atomic positions, reader/wri
 
 The upper layer creates files and assigns exactly one live writer and one live reader per Queue. It also assigns one waiting loop to each Bell slot and owns paths, business encoding, completion policy, shutdown, and resource removal. A loop may own several Queue endpoints, and many peers may ring its slot. Neither the Queue nor the Bell file contains an ownership lock, reference count, or second liveness protocol.
 
-The [SDK implementation contract](../sdk/SDK-impl-contract.md) defines how Source submission, Source completion, and Sink egress use these primitives. IPC itself does not interpret those records.
+The [SDK implementation contract](../sdk/plugin-sdk-contract.md) defines how Source submission, Source completion, and Sink egress use these primitives. IPC itself does not interpret those records.
 
 ## Queue v1 layout
 
@@ -212,4 +212,4 @@ For performance changes, measure throughput, latency, CPU and memory at equivale
 
 ## Adding a language
 
-Start with `ipc/<language>` and prove this contract using the shared vectors, corruption and crash cases, real wait/wake, and bidirectional interoperability. Next implement lifecycle and Source/Sink adapters under `sdk/<language>/plugin-sdk` using the [SDK contract](../sdk/SDK-impl-contract.md). Then supply source, sink, and source-and-sink project scaffolds, bundle/install validation, and real Runner data-flow and failure tests. Declare official support only after the applicable acceptance passes on every claimed target.
+Start with `ipc/<language>` and prove this contract using the shared vectors, corruption and crash cases, real wait/wake, and bidirectional interoperability. Next implement lifecycle and Source/Sink adapters under `sdk/<language>/plugin-sdk` using the [SDK contract](../sdk/plugin-sdk-contract.md). Then supply source, sink, and source-and-sink project scaffolds, bundle/install validation, and real Runner data-flow and failure tests. Declare official support only after the applicable acceptance passes on every claimed target.

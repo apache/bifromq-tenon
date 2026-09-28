@@ -167,6 +167,7 @@ pub(super) fn spawn_plugin(
     socket_path: &Path,
     launch_id: &[u8; PLUGIN_LAUNCH_ID_LENGTH],
     diagnostics: PluginDiagnosticPublisher,
+    metrics: super::metrics::Registration,
 ) -> PluginSpawnOutcome {
     let Some((program, arguments)) = launch.command.split_first() else {
         return PluginSpawnOutcome::Failed(PluginStartFailure::CommandMissing);
@@ -229,7 +230,14 @@ pub(super) fn spawn_plugin(
         ));
     };
     PluginSpawnOutcome::Started {
-        process: PluginProcess::new(lifetime_channel, child, stdout, stderr, diagnostics),
+        process: PluginProcess::new(
+            lifetime_channel,
+            child,
+            stdout,
+            stderr,
+            diagnostics,
+            metrics,
+        ),
         config,
     }
 }
@@ -293,6 +301,7 @@ impl fmt::Debug for PluginStartupWriter {
 }
 
 pub(super) struct PluginProcess {
+    metrics: Option<super::metrics::Registration>,
     #[cfg(not(feature = "repository-test-support"))]
     lifetime_channel: ChildStdin,
     // Repository tests can independently release this OS resource to reproduce owner loss.
@@ -311,6 +320,7 @@ impl PluginProcess {
         stdout: ChildStdout,
         stderr: ChildStderr,
         diagnostics: PluginDiagnosticPublisher,
+        metrics: super::metrics::Registration,
     ) -> Self {
         Self {
             #[cfg(not(feature = "repository-test-support"))]
@@ -319,6 +329,7 @@ impl PluginProcess {
             lifetime_channel: Some(lifetime_channel),
             child,
             _output: PluginOutput::new(stdout, stderr, diagnostics),
+            metrics: Some(metrics),
             observed_exit: None,
             stop_request: ProcessStopRequest::None,
         }
@@ -367,6 +378,7 @@ impl PluginProcess {
         match waiting.as_mut().poll(context) {
             Poll::Ready(Ok(status)) => {
                 self.observed_exit = Some(status);
+                self.metrics.take();
                 Poll::Ready(Ok(status))
             }
             Poll::Ready(Err(source)) => Poll::Ready(Err(source)),
@@ -401,6 +413,7 @@ impl PluginProcess {
         }
         let status = self.child.wait().await?;
         self.observed_exit = Some(status);
+        self.metrics.take();
         Ok(status)
     }
 

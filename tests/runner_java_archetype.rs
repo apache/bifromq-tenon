@@ -389,6 +389,62 @@ fn verify_java_plugin_metrics(address: std::net::SocketAddr) -> io::Result<()> {
             }
         }
         Ok(None)
+    })?;
+    verify_java_process_resources(address, &["primary", "source"])
+}
+
+fn verify_java_process_resources(
+    address: std::net::SocketAddr,
+    expected: &[&str],
+) -> io::Result<()> {
+    wait_until(|| {
+        let response = request(
+            address,
+            "GET",
+            "/metrics?include=tenon.plugin.cpu,tenon.plugin.memory",
+            &[],
+            &[],
+        )?;
+        assert_eq!(response.status, 200);
+        let body = response.json();
+        let processes = body["processes"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("Missing processes"))?;
+        let mut ids = Vec::new();
+        for process in processes {
+            assert_eq!(process["resource"]["service.name"], "tenon.plugin");
+            let metrics = process["metrics"]
+                .as_array()
+                .ok_or_else(|| io::Error::other("Missing metrics"))?;
+            if metrics.len() != 2 {
+                return Ok(None);
+            }
+            for metric in metrics {
+                let points = metric["points"]
+                    .as_array()
+                    .ok_or_else(|| io::Error::other("Missing points"))?;
+                assert_eq!(points.len(), 1);
+                if metric["name"] == "tenon.plugin.memory" {
+                    assert_eq!(metric["unit"], "By");
+                    assert!(
+                        points[0]["value"]
+                            .as_str()
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .is_some_and(|v| v > 0)
+                    );
+                } else {
+                    assert_eq!(metric["name"], "tenon.plugin.cpu");
+                    assert_eq!(metric["unit"], "1");
+                }
+            }
+            ids.push(
+                process["resource"]["tenon.plugin.instance.id"]
+                    .as_str()
+                    .unwrap_or(""),
+            );
+        }
+        ids.sort_unstable();
+        Ok((ids == expected).then_some(()))
     })
 }
 
@@ -507,7 +563,7 @@ fn build_generated_java_plugins_uncached(
             "--batch-mode",
             "--no-transfer-progress",
             "-pl",
-            ".,:tenon-ipc,plugin-sdk,maven-plugin,plugin-archetype",
+            ".,:tenon-ipc,:tenon-process-metrics,plugin-sdk,maven-plugin,plugin-archetype",
             "clean",
             "install",
         ]);
@@ -783,10 +839,11 @@ fn build_generated_project(
 }
 
 fn verify_java_release_repository(local_repository: &Path) -> io::Result<()> {
-    const RELEASE_ARTIFACTS: [&str; 3] = [
+    const RELEASE_ARTIFACTS: [&str; 4] = [
         "tenon-maven-plugin",
         "tenon-plugin-archetype",
         "tenon-plugin-sdk",
+        "tenon-process-metrics",
     ];
 
     let group_directory = local_repository.join("org/apache/bifromq/tenon");
@@ -800,7 +857,7 @@ fn verify_java_release_repository(local_repository: &Path) -> io::Result<()> {
     actual.sort_unstable();
     if actual != RELEASE_ARTIFACTS {
         return Err(io::Error::other(format!(
-            "Java release repository must contain exactly three public artifacts; observed {actual:?}"
+            "Java release repository must contain exactly four public artifacts; observed {actual:?}"
         )));
     }
 

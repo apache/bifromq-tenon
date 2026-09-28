@@ -229,6 +229,7 @@ message PipelineMetricsSnapshot {
 
 message RunnerToPipelineMetrics {
   repeated string include = 1;
+  uint64 remaining_timeout_ms = 2;
 }
 
 // Opens a best-effort pull stream independent from correctness and diagnostics.

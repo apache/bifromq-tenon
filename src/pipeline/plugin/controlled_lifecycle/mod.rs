@@ -547,13 +547,21 @@ impl PluginInstanceOwner {
         on_created: impl FnOnce(),
     ) -> ControlledPluginState {
         let ControlledPluginLaunch {
+            metrics_attributes,
             process,
             interface,
             control,
         } = launch;
         let pending = control.register(interface);
         let launch_id = *pending.launch_id();
-        match spawn_plugin(process, control.socket_path(), &launch_id, diagnostics) {
+        let metrics = control.register_metrics(&launch_id, metrics_attributes);
+        match spawn_plugin(
+            process,
+            control.socket_path(),
+            &launch_id,
+            diagnostics,
+            metrics,
+        ) {
             PluginSpawnOutcome::Started { process, config } => {
                 on_created();
                 ControlledPluginState::Starting(ControlledPluginStartup {

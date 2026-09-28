@@ -108,7 +108,7 @@
       "text": 5,
       "truncated": 6,
       "invalid_utf8": 7,
-    "sequence": 8,
+      "sequence": 8,
       "lua_vm_instance_id": 9,
       "kind": 10,
       "phase": 11,
@@ -135,7 +135,8 @@
       "metrics": 1
     },
     "RunnerToPipelineMetrics": {
-      "include": 1
+      "include": 1,
+      "remaining_timeout_ms": 2
     }
   },
   "oneofs": {
