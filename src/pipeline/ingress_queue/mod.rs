@@ -246,15 +246,27 @@ impl IngressQueuePair {
                 "admission backpressure is local to the Source SDK, never a Pipeline completion"
             ),
         };
-        let encoded = IngressCompletion {
+        let completion = IngressCompletion {
             record_id,
             status: status as i32,
-        }
-        .encode_to_vec();
+        };
+        // The fixed v1 schema fits 13 bytes, including the largest record id.
+        // This buffer stays alive throughout the synchronous capacity wait.
+        let mut storage = [0_u8; COMPLETION_MAX_PAYLOAD_SIZE];
+        let mut remaining = storage.as_mut_slice();
+        #[allow(
+            clippy::expect_used,
+            reason = "the fixed v1 completion schema fits COMPLETION_MAX_PAYLOAD_SIZE"
+        )]
+        completion
+            .encode(&mut remaining)
+            .expect("the fixed v1 completion must fit its maximum payload size");
+        let encoded_len = COMPLETION_MAX_PAYLOAD_SIZE - remaining.len();
+        let encoded = &storage[..encoded_len];
         loop {
             let outcome = self
                 .completion
-                .try_write_observed(&encoded, || {
+                .try_write_observed(encoded, || {
                     wait.ready();
                     metrics.completion(result);
                 })

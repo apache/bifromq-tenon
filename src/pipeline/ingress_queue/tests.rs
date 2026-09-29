@@ -36,7 +36,10 @@ use super::{
 };
 use crate::contracts::source::{IngressCompletion, IngressCompletionStatus, IngressRecord};
 use tenon_ipc::bell::{BellInterrupter, BellRegion, WaitOutcome, create_bell_region};
-use tenon_ipc::queue::{QueueReader, QueueWriter, ReadOutcome, WriteOutcome, create_queue_file};
+use tenon_ipc::queue::{
+    QueueReader, QueueWaiter, QueueWriter, ReadOutcome, WriteOutcome, create_queue_file,
+    queue_waiter_is_armed,
+};
 
 #[test]
 fn receive_returns_an_owned_record_and_releases_submission() -> io::Result<()> {
@@ -92,31 +95,56 @@ fn protobuf_decoding_reuses_the_owned_input_allocation() -> io::Result<()> {
 
 #[test]
 fn complete_commits_the_exact_completion_record() -> io::Result<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Vectors {
+        completion_valid: Vec<CompletionVector>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CompletionVector {
+        name: String,
+        record_id: u64,
+        status: String,
+        encoded: Vec<u8>,
+    }
+    let vectors: Vectors = serde_json::from_slice(include_bytes!(
+        "../../../contracts/source/ingress_record_test_vectors.json"
+    ))
+    .map_err(io::Error::other)?;
+    assert!(!vectors.completion_valid.is_empty());
     let fixture = IngressPairFixture::new(2, 128)?;
     let mut pair = fixture.open_pair()?;
     let mut source_reader = fixture.source_completion_reader()?;
 
-    assert_eq!(
-        pair.complete(
-            41,
-            IngressCompletionStatus::Ok,
-            &ChannelMetrics::default(),
-            &mut ChannelMetrics::default().wait(WaitKind::CompletionCapacity)
-        )
-        .map_err(io::Error::other)?,
-        IngressCompletionWriteOutcome::Committed
-    );
-
-    let ReadOutcome::Record(record) = source_reader.try_read().map_err(io::Error::other)? else {
-        return Err(io::Error::other("Completion record was not committed"));
-    };
-    assert_eq!(
-        IngressCompletion::decode(record.payload()).map_err(io::Error::other)?,
-        IngressCompletion {
-            record_id: 41,
-            status: IngressCompletionStatus::Ok as i32,
-        }
-    );
+    for vector in vectors.completion_valid {
+        let status = match vector.status.as_str() {
+            "OK" => IngressCompletionStatus::Ok,
+            "RETRY" => IngressCompletionStatus::Retry,
+            "ERROR" => IngressCompletionStatus::Error,
+            // Admission backpressure never enters the Pipeline writer.
+            "BACKPRESSURE" => continue,
+            _ => return Err(io::Error::other("Unknown completion vector status")),
+        };
+        assert_eq!(
+            pair.complete(
+                vector.record_id,
+                status,
+                &ChannelMetrics::default(),
+                &mut ChannelMetrics::default().wait(WaitKind::CompletionCapacity)
+            )
+            .map_err(io::Error::other)?,
+            IngressCompletionWriteOutcome::Committed,
+            "{}",
+            vector.name
+        );
+        let ReadOutcome::Record(record) = source_reader.try_read().map_err(io::Error::other)?
+        else {
+            return Err(io::Error::other("Completion record was not committed"));
+        };
+        assert_eq!(record.payload(), vector.encoded, "{}", vector.name);
+        source_reader.release(1).map_err(io::Error::other)?;
+    }
     Ok(())
 }
 
@@ -257,6 +285,21 @@ fn completion_wait_resumes_after_the_source_releases_space() -> io::Result<()> {
     });
 
     let release_result = (|| -> io::Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !queue_waiter_is_armed(
+            &fixture.completion_path,
+            &fixture._directory.path().join("channels.bells"),
+            QueueWaiter::Writer,
+        )
+        .map_err(io::Error::other)?
+        {
+            if std::time::Instant::now() >= deadline {
+                return Err(io::Error::other(
+                    "Completion writer never armed its doorbell",
+                ));
+            }
+            std::thread::yield_now();
+        }
         if !matches!(
             source_reader.try_read().map_err(io::Error::other)?,
             ReadOutcome::Record(_)
@@ -285,6 +328,18 @@ fn completion_wait_resumes_after_the_source_releases_space() -> io::Result<()> {
         .map_err(|_| io::Error::other("Completion writer thread panicked"))?;
     let completion = completion.map_err(io::Error::other)?;
     assert_eq!(completion, IngressCompletionWriteOutcome::Committed);
+    for expected in [encoded, maximum_completion(u64::MAX - 1)] {
+        let ReadOutcome::Record(record) = source_reader.try_read().map_err(io::Error::other)?
+        else {
+            return Err(io::Error::other("Completion record was not committed"));
+        };
+        assert_eq!(record.payload(), expected);
+        source_reader.release(1).map_err(io::Error::other)?;
+    }
+    assert!(matches!(
+        source_reader.try_read().map_err(io::Error::other)?,
+        ReadOutcome::Empty
+    ));
     Ok(())
 }
 
