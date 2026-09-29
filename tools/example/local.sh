@@ -84,7 +84,7 @@ cargo run --manifest-path "$tenon_root/sdk/rust/Cargo.toml" \
   --package cargo-tenon -- bundle \
   --manifest-path "$demo_root/hello-tenon/Cargo.toml" \
   --config "patch.crates-io.tenon-plugin-sdk.path=\"$tenon_root/sdk/rust/plugin-sdk\"" \
-  --config "patch.crates-io.tenon-ipc.path=\"$tenon_root/ipc/rust/tenon-ipc\"" \
+  --config "patch.crates-io.tenon-ipc.path=\"$tenon_root/sdk/rust/ipc\"" \
   > "$bundle_json"
 bundle="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$bundle_json")"
 
@@ -100,7 +100,7 @@ for plugin in dummy-source stdout-sink; do
     --package cargo-tenon -- bundle \
     --manifest-path "$manifest" \
     --config "patch.crates-io.tenon-plugin-sdk.path=\"$tenon_root/sdk/rust/plugin-sdk\"" \
-    --config "patch.crates-io.tenon-ipc.path=\"$tenon_root/ipc/rust/tenon-ipc\"" \
+    --config "patch.crates-io.tenon-ipc.path=\"$tenon_root/sdk/rust/ipc\"" \
     > "$report"
   builtin_bundles+=("$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$report")")
 done

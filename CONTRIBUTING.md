@@ -29,7 +29,7 @@ Build and validate changes using the toolchains fixed by the repository. Keep ch
 | --- | --- |
 | `src/` | Runner, Pipeline, Lua execution, configuration and management |
 | `contracts/` | Schemas, protocol sources, descriptors and shared conformance vectors |
-| `ipc/` | Rust and Java shared-memory queue and native wait implementations |
+| `sdk/rust/ipc/`, `sdk/java/ipc/` | Rust and Java shared-memory queue and native wait implementations |
 | `sdk/` | Public SDK contract, language SDKs and plugin generators |
 | `plugin/` | Plugins developed with the standard SDK and packaging tools |
 | `tests/` | Integration tests and public test fixtures |
