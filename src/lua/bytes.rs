@@ -100,14 +100,7 @@ pub(super) fn install(
         )?;
     }
 
-    publish_readonly_namespace(
-        lua,
-        environment_values,
-        "bytes",
-        backing,
-        &protected_names,
-        fatal_fault,
-    )
+    publish_readonly_namespace(lua, environment_values, "bytes", backing, &protected_names)
 }
 
 fn install_function(

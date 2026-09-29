@@ -180,7 +180,7 @@ pub(super) fn project(
             backing.raw_set("eligibleAt", eligible_at.0)?;
         }
     }
-    install_readonly_backing(lua, backing, fatal_fault)
+    install_readonly_backing(lua, backing)
 }
 
 fn project_source_message(
@@ -199,7 +199,7 @@ fn project_source_message(
             project_source_field(lua, &field, value.as_ref(), Rc::clone(&fatal_fault))?,
         )?;
     }
-    install_readonly_backing(lua, backing, fatal_fault)
+    install_readonly_backing(lua, backing)
 }
 
 fn project_source_field(
@@ -225,7 +225,7 @@ fn project_source_field(
                 Rc::clone(&fatal_fault),
             )?)?;
         }
-        return install_readonly_backing(lua, backing, fatal_fault).map(LuaValue::Table);
+        return install_readonly_backing(lua, backing).map(LuaValue::Table);
     }
     project_source_scalar(lua, &field.kind(), value, fatal_fault)
 }
@@ -251,7 +251,7 @@ fn project_source_map(
             project_source_scalar(lua, &value_kind, value, Rc::clone(&fatal_fault))?,
         )?;
     }
-    install_readonly_backing(lua, backing, fatal_fault)
+    install_readonly_backing(lua, backing)
 }
 
 fn project_source_map_key(lua: &Lua, key: &MapKey) -> mlua::Result<LuaValue> {

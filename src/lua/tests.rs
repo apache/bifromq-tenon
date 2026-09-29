@@ -4432,7 +4432,15 @@ fn script_can_retain_an_old_event_across_main_calls() -> io::Result<()> {
                 return
             end
 
-            assert(event.type == "timer")
+            if calls == 2 then
+                assert(event.type == "source")
+                assert(event.payload.deviceId == "device-8")
+                assert(#event.payload.children == 0)
+                assert(#event.payload.registers == 1)
+                assert(event.payload.registers[1] == 23)
+            else
+                assert(event.type == "timer")
+            end
             assert(saved.type == "source")
             assert(saved.payload.deviceId == "device-7")
             assert(saved.payload.body == string.char(0, 128, 255))
@@ -4441,7 +4449,9 @@ fn script_can_retain_an_old_event_across_main_calls() -> io::Result<()> {
             assert(
                 json.encode(saved.payload.registers) == '[7,11]'
             )
-            saved = nil
+            if calls == 3 then
+                saved = nil
+            end
         end
         "#,
         limits()?,
@@ -4453,7 +4463,22 @@ fn script_can_retain_an_old_event_across_main_calls() -> io::Result<()> {
         .into_result_without_emit_boundaries()
         .map_err(test_error)?;
     drop(source);
-    vm.call_timer(1_700_000_000_124)
+    let mut next_source = full_source_message(&lua_source_contract()?)?;
+    for (name, value) in [
+        ("device_id", ProtobufValue::String(String::from("device-8"))),
+        ("children", ProtobufValue::List(Vec::new())),
+        (
+            "registers",
+            ProtobufValue::List(vec![ProtobufValue::U32(23)]),
+        ),
+    ] {
+        set_protobuf_field(&mut next_source, name, value)?;
+    }
+    call_source(&mut vm, 1_700_000_000_124, next_source.encode_to_vec())?
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    vm.lua.gc_collect().map_err(mlua_test_error)?;
+    vm.call_timer(1_700_000_000_125)
         .into_result_without_emit_boundaries()
         .map_err(test_error)?;
 
@@ -4461,8 +4486,50 @@ fn script_can_retain_an_old_event_across_main_calls() -> io::Result<()> {
         vm.environment_values
             .raw_get::<i64>("calls")
             .map_err(|_| io::Error::other("call counter must remain readable"))?,
-        2
+        3
     );
+    Ok(())
+}
+
+#[test]
+fn readonly_faults_and_callback_lifetimes_are_isolated_between_vms() -> io::Result<()> {
+    let script = r#"
+        function main(event)
+            assert(#event.payload.registers == 2)
+            if event.timestamp == 2 then
+                pcall(function() event.payload.registers[1] = 99 end)
+            end
+        end
+    "#;
+    let mut first = load_vm(script, limits()?).map_err(test_error)?;
+    let mut second = load_vm(script, limits()?).map_err(test_error)?;
+    let first_fault = Rc::downgrade(&first.fatal_fault);
+    let source = full_source_payload()?;
+
+    let Err(error) =
+        call_source(&mut first, 2, source.clone())?.into_result_without_emit_boundaries()
+    else {
+        return Err(io::Error::other(
+            "readonly write must invalidate the first VM",
+        ));
+    };
+    assert_eq!(error.kind(), LuaVmErrorKind::SandboxViolation);
+    call_source(&mut second, 1, source.clone())?
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    drop(first);
+    assert!(first_fault.upgrade().is_none());
+
+    call_source(&mut second, 1, source.clone())?
+        .into_result_without_emit_boundaries()
+        .map_err(test_error)?;
+    let Err(error) = call_source(&mut second, 2, source)?.into_result_without_emit_boundaries()
+    else {
+        return Err(io::Error::other(
+            "readonly write must invalidate the second VM",
+        ));
+    };
+    assert_eq!(error.kind(), LuaVmErrorKind::SandboxViolation);
     Ok(())
 }
 
@@ -5004,12 +5071,13 @@ fn stops_memory_exhaustion_even_inside_protected_calls() -> io::Result<()> {
 
 #[test]
 fn dropping_vm_releases_the_embedded_lua_state() -> io::Result<()> {
-    let weak = {
+    let (weak, fault) = {
         let vm = load_vm("function main(event) end", limits()?).map_err(test_error)?;
-        vm.lua.weak()
+        (vm.lua.weak(), Rc::downgrade(&vm.fatal_fault))
     };
 
     assert!(weak.try_upgrade().is_none());
+    assert!(fault.upgrade().is_none());
     Ok(())
 }
 

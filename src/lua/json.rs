@@ -124,14 +124,7 @@ pub(super) fn install(
     )?;
     backing.raw_set("null", null)?;
 
-    publish_readonly_namespace(
-        lua,
-        environment_values,
-        "json",
-        backing,
-        &protected_names,
-        fatal_fault,
-    )
+    publish_readonly_namespace(lua, environment_values, "json", backing, &protected_names)
 }
 
 fn decode(

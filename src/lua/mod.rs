@@ -79,6 +79,8 @@ const INTERNAL_MAIN_FAILED_ERROR: &str = "Tenon Lua main execution failed";
 const CURRENT_TIME_ERROR: &str = "currentTimeMillis system time is out of range";
 const SOURCE_ENVIRONMENT_PREFIX: &str = "local _ENV <const> = _ENV\n";
 const PROXY_BACKING_METAFIELD: &str = "__tenon_proxy_backing";
+const READONLY_LENGTH_REGISTRY_KEY: &str = "__tenon_readonly_len";
+const READONLY_WRITE_REGISTRY_KEY: &str = "__tenon_readonly_newindex";
 
 const BASE_GLOBALS: &[&str] = &[
     "_VERSION", "assert", "error", "ipairs", "select", "tonumber", "tostring", "type",
@@ -832,6 +834,7 @@ impl Sandbox {
             protected_names: Rc::new(RefCell::new(HashSet::new())),
             fatal_fault,
         };
+        install_readonly_callbacks(lua, Rc::clone(&guards.fatal_fault))?;
         let environment_values = lua.create_table()?;
         let environment = lua.create_table()?;
         let emit_slot = emit::EmitSlot::default();
@@ -873,12 +876,7 @@ impl Sandbox {
             ("os", OS_FUNCTIONS),
         ] {
             let native_library = native_globals.get::<Table>(library_name)?;
-            let proxy = install_readonly_library(
-                lua,
-                &native_library,
-                fields,
-                Rc::clone(&guards.fatal_fault),
-            )?;
+            let proxy = install_readonly_library(lua, &native_library, fields)?;
             environment_values.raw_set(library_name, proxy.clone())?;
             protect_name(&guards.protected_names, library_name);
 
@@ -1070,27 +1068,22 @@ fn install_readonly_library(
     lua: &Lua,
     native_library: &Table,
     fields: &[&str],
-    fatal_fault: Rc<Cell<Option<LuaVmFatalFault>>>,
 ) -> mlua::Result<Table> {
     let backing = lua.create_table()?;
     for field in fields {
         backing.raw_set(*field, native_library.get::<Value>(*field)?)?;
     }
-    install_readonly_backing(lua, backing, fatal_fault)
+    install_readonly_backing(lua, backing)
 }
 
-fn install_readonly_backing(
+fn install_readonly_callbacks(
     lua: &Lua,
-    backing: Table,
     fatal_fault: Rc<Cell<Option<LuaVmFatalFault>>>,
-) -> mlua::Result<Table> {
-    let proxy = lua.create_table()?;
-    let metatable = lua.create_table()?;
-    metatable.raw_set("__index", backing.clone())?;
-    metatable.raw_set(PROXY_BACKING_METAFIELD, backing.clone())?;
+) -> mlua::Result<()> {
+    // The registry owns these callbacks for this VM; neither retains an event.
     let length_fault = Rc::clone(&fatal_fault);
-    metatable.raw_set(
-        "__len",
+    lua.set_named_registry_value(
+        READONLY_LENGTH_REGISTRY_KEY,
         lua.create_function(move |_, proxy: Table| {
             let Some(backing) = proxy_backing(&proxy)? else {
                 return Err(sandbox_violation(&length_fault));
@@ -1103,9 +1096,24 @@ fn install_readonly_backing(
             })
         })?,
     )?;
+    lua.set_named_registry_value(
+        READONLY_WRITE_REGISTRY_KEY,
+        lua.create_function(move |_, _: MultiValue| Err::<(), _>(sandbox_violation(&fatal_fault)))?,
+    )
+}
+
+fn install_readonly_backing(lua: &Lua, backing: Table) -> mlua::Result<Table> {
+    let proxy = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    metatable.raw_set("__index", backing.clone())?;
+    metatable.raw_set(PROXY_BACKING_METAFIELD, backing)?;
+    metatable.raw_set(
+        "__len",
+        lua.named_registry_value::<Function>(READONLY_LENGTH_REGISTRY_KEY)?,
+    )?;
     metatable.raw_set(
         "__newindex",
-        lua.create_function(move |_, _: MultiValue| Err::<(), _>(sandbox_violation(&fatal_fault)))?,
+        lua.named_registry_value::<Function>(READONLY_WRITE_REGISTRY_KEY)?,
     )?;
     proxy.set_metatable(Some(metatable))?;
     Ok(proxy)
@@ -1128,9 +1136,8 @@ fn publish_readonly_namespace(
     name: &str,
     backing: Table,
     protected_names: &Rc<RefCell<HashSet<Vec<u8>>>>,
-    fatal_fault: Rc<Cell<Option<LuaVmFatalFault>>>,
 ) -> mlua::Result<()> {
-    let proxy = install_readonly_backing(lua, backing, fatal_fault)?;
+    let proxy = install_readonly_backing(lua, backing)?;
     environment_values.raw_set(name, proxy)?;
     protect_name(protected_names, name);
     Ok(())
