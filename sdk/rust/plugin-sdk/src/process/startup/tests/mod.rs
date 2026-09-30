@@ -19,7 +19,8 @@
 
 use super::*;
 
-const VECTORS: &str = include_str!("../../../../contracts/test-fixtures/process_protocol_test_vectors.json");
+const VECTORS: &str =
+    include_str!("../../../../contracts/test-fixtures/process_protocol_test_vectors.json");
 
 fn sink_input_values(inputs: &[SinkInput]) -> Value {
     Value::Array(
