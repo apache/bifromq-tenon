@@ -687,7 +687,7 @@ enum Plan {
     Done,
 }
 
-fn plan(writer: &Writer, channel: &Shared, held: Option<&Vec<u8>>) -> io::Result<Plan> {
+fn plan(writer: &Writer, channel: &Shared, held: Option<&IngressRecord>) -> io::Result<Plan> {
     if channel.stopped() {
         return Ok(Plan::Done);
     }
@@ -696,54 +696,52 @@ fn plan(writer: &Writer, channel: &Shared, held: Option<&Vec<u8>>) -> io::Result
     }
     match held {
         // A held record is the one this loop owns until the Queue takes it whole.
-        Some(encoded) if writer.can_write(encoded.len())? => Ok(Plan::Write),
+        Some(record) if writer.can_write(record.encoded_len())? => Ok(Plan::Write),
         Some(_) => Ok(Plan::Wait),
         None if channel.has_submission() => Ok(Plan::Write),
         None => Ok(Plan::Wait),
     }
 }
 
-/// Writes one Channel's owed record, and reports whether this round wrote.
+/// Advances one Channel by committing or rejecting its next owed record.
 ///
 /// The record is registered before the frame can be committed, so a Completion
 /// that returns before this loop looks it up is not lost.
-fn write(writer: &mut Writer, channel: &Shared, held: &mut Option<Vec<u8>>) -> io::Result<bool> {
-    if let Some(encoded) = held.as_ref() {
-        return Ok(matches!(
-            writer.try_write(encoded)?,
-            WriteOutcome::Committed(_)
-        ))
-        .inspect(|&committed| {
-            if committed {
-                *held = None
-            }
-        });
-    }
-    let record_id = writer.committed_position()?.get() + 1;
-    let Some(submission) = channel.next_submission() else {
-        return Ok(false);
-    };
-    let record = IngressRecord {
-        record_id,
-        payload: submission.payload,
-    };
-    if record.encoded_len() > writer.max_payload_size().get() as usize {
-        submission.request.complete(Ok(AckCode::Error));
-        return Ok(true);
-    }
-    // Register before the frame can be committed, so a Completion that returns
-    // before this loop looks it up is not lost.
-    channel.register(record_id, submission.request);
-    *held = Some(record.encode_to_vec());
-    Ok(matches!(
-        writer.try_write(held.as_ref().expect("a record was just held"))?,
-        WriteOutcome::Committed(_)
-    ))
-    .inspect(|&committed| {
-        if committed {
-            *held = None
+fn write(
+    writer: &mut Writer,
+    channel: &Shared,
+    held: &mut Option<IngressRecord>,
+) -> io::Result<bool> {
+    if held.is_none() {
+        let record_id = writer.committed_position()?.get() + 1;
+        let Some(submission) = channel.next_submission() else {
+            return Ok(false);
+        };
+        let record = IngressRecord {
+            record_id,
+            payload: submission.payload,
+        };
+        if record.encoded_len() > writer.max_payload_size().get() as usize {
+            submission.request.complete(Ok(AckCode::Error));
+            return Ok(true);
         }
-    })
+        // Register before publication so a fast Completion cannot be lost.
+        channel.register(record_id, submission.request);
+        *held = Some(record);
+    }
+    let record = held.as_ref().expect("a record is held before writing");
+    let committed = matches!(
+        writer.try_write_with(
+            record.encoded_len(),
+            |destination| { record.encode(destination).map_err(io::Error::other) },
+            || {}
+        )?,
+        WriteOutcome::Committed(_)
+    );
+    if committed {
+        *held = None;
+    }
+    Ok(committed)
 }
 
 /// Writes every Channel's Submission Queue from the one loop that owns them.
@@ -758,8 +756,8 @@ fn submissions(
     shared: &SessionState,
     bell: Arc<LoopBell>,
 ) -> io::Result<()> {
-    // The one encoded record per Channel that is waiting for Queue space.
-    let mut held: Vec<Option<Vec<u8>>> = (0..writers.len()).map(|_| None).collect();
+    // One owned record per Channel waits for space without a second encoding buffer.
+    let mut held: Vec<Option<IngressRecord>> = (0..writers.len()).map(|_| None).collect();
     loop {
         let mut waiting = false;
         let mut progressed = false;

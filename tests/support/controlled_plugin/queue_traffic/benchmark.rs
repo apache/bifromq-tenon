@@ -164,7 +164,11 @@ impl Benchmark {
             }
             .encode(&mut self.encoded)?;
             let submitted = Instant::now();
-            match self.writer.try_write(&self.encoded)? {
+            match self.writer.try_write_with(
+                self.encoded.len(),
+                |destination| std::io::Write::write_all(destination, &self.encoded),
+                || {},
+            )? {
                 WriteOutcome::Committed(_) => self.pending.push_back((id, submitted)),
                 WriteOutcome::Full => break,
             }

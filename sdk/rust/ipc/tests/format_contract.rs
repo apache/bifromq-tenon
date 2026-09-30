@@ -599,7 +599,11 @@ fn a_peer_ordinal_the_bell_region_cannot_hold_is_reported_and_left_in_place() ->
     // reports it rather than rewriting the peer's published ordinal.
     write_header_word(&path, HEADER_READER_BELL_OFFSET, 2)?;
     let error = writer
-        .try_write(b"A")
+        .try_write_with(
+            b"A".len(),
+            |destination| std::io::Write::write_all(destination, b"A"),
+            || {},
+        )
         .err()
         .ok_or_else(|| io::Error::other("a peer ordinal beyond the Bell Region was accepted"))?;
     let QueueRuntimeError::Bell(bell) = &error else {

@@ -40,7 +40,13 @@ fn a_full_last_target_prevents_any_partial_fanout_until_real_release() -> io::Re
     let second_path = directory.path().join("second");
     let (mut second, mut second_reader) = queue(&second_path, 16)?;
     assert!(matches!(
-        second.try_write(&[9; 8]).map_err(io::Error::other)?,
+        second
+            .try_write_with(
+                [9; 8].len(),
+                |destination| std::io::Write::write_all(destination, &[9; 8]),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     assert!(matches!(
@@ -92,7 +98,13 @@ fn stop_interrupts_a_full_target_without_committing_to_any_target() -> io::Resul
     let second_path = directory.path().join("second");
     let (mut second, mut second_reader) = queue(&second_path, 16)?;
     assert!(matches!(
-        second.try_write(&[9; 8]).map_err(io::Error::other)?,
+        second
+            .try_write_with(
+                [9; 8].len(),
+                |destination| std::io::Write::write_all(destination, &[9; 8]),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     assert!(matches!(

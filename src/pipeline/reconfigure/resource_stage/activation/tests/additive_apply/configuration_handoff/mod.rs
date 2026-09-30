@@ -494,7 +494,11 @@ fn submit_value(writer: &mut QueueWriter, record_id: u64, value: &str) -> TestRe
         .encode_to_vec()
         .into(),
     };
-    match writer.try_write(&record.encode_to_vec())? {
+    match writer.try_write_with(
+        record.encoded_len(),
+        |destination| record.encode(destination).map_err(std::io::Error::other),
+        || {},
+    )? {
         WriteOutcome::Committed(_) => Ok(()),
         WriteOutcome::Full => Err("Fixture Submission Queue is full".into()),
     }

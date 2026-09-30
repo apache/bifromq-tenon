@@ -92,7 +92,11 @@ impl QueueTraffic {
                 channel_bell_path.ok_or("Source launch has no Channel region")?,
             )?;
             if !matches!(
-                writer.try_write(&record.encode_to_vec())?,
+                writer.try_write_with(
+                    record.encoded_len(),
+                    |destination| record.encode(destination).map_err(std::io::Error::other),
+                    || {}
+                )?,
                 WriteOutcome::Committed(_)
             ) {
                 return Err("Fixture Source admission exceeded its bounded Queue".into());

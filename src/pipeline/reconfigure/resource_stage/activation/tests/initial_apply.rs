@@ -139,13 +139,17 @@ async fn source_config_and_lua_replace_the_session_and_definition_together() -> 
         assert_eq!(queue_files(root)?, files);
         let mut source = source_writer(root, "dual-b", "dual-to-archive", 0)?;
         assert!(matches!(
-            source.try_write(
-                &IngressRecord {
+            {
+                let record = IngressRecord {
                     record_id: 42,
-                    payload: Vec::new().into()
-                }
-                .encode_to_vec()
-            )?,
+                    payload: Vec::new().into(),
+                };
+                source.try_write_with(
+                    record.encoded_len(),
+                    |destination| record.encode(destination).map_err(std::io::Error::other),
+                    || {},
+                )
+            }?,
             WriteOutcome::Committed(_)
         ));
         let mut completion = source_completion(root, "dual-b", "dual-to-archive", 0)?;

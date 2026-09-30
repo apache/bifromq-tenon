@@ -238,7 +238,11 @@ impl Fixture {
         }
         .encode_to_vec();
         assert!(matches!(
-            self.writers[channel].try_write(&encoded)?,
+            self.writers[channel].try_write_with(
+                encoded.len(),
+                |destination| std::io::Write::write_all(destination, &encoded),
+                || {}
+            )?,
             WriteOutcome::Committed(_)
         ));
         Ok(())
@@ -306,7 +310,11 @@ fn flow_paths_and_payload_decoding_match_shared_vectors() -> Result<(), Error> {
     let mut reader = Reader::open(&path, bells.loop_bell(1)?, Arc::clone(&bells))?;
     let encoded: Vec<u8> = serde_json::from_value(vectors["matching"]["encoded"].clone())?;
     assert!(matches!(
-        writer.try_write(&encoded)?,
+        writer.try_write_with(
+            encoded.len(),
+            |destination| std::io::Write::write_all(destination, &encoded),
+            || {}
+        )?,
         WriteOutcome::Committed(_)
     ));
     let payload: Payload = decode(match reader.try_read()? {
@@ -322,7 +330,11 @@ fn flow_paths_and_payload_decoding_match_shared_vectors() -> Result<(), Error> {
     {
         let encoded: Vec<u8> = serde_json::from_value(vector["encoded"].clone())?;
         assert!(matches!(
-            writer.try_write(&encoded)?,
+            writer.try_write_with(
+                encoded.len(),
+                |destination| std::io::Write::write_all(destination, &encoded),
+                || {}
+            )?,
             WriteOutcome::Committed(_)
         ));
         let error = decode::<Payload>(match reader.try_read()? {
@@ -565,7 +577,11 @@ fn stopping_during_a_result_poll_ignores_the_late_result_and_late_wakes() -> Res
         }
         .encode_to_vec();
         assert!(matches!(
-            writer.try_write(&encoded)?,
+            writer.try_write_with(
+                encoded.len(),
+                |destination| std::io::Write::write_all(destination, &encoded),
+                || {}
+            )?,
             WriteOutcome::Committed(_)
         ));
         let waker = observed.recv_timeout(DEADLINE)?;

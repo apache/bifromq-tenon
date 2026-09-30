@@ -1264,7 +1264,14 @@ fn wait_for_queue_record(reader: &mut QueueReader) -> io::Result<Vec<u8>> {
 }
 
 fn commit_queue_record(writer: &mut QueueWriter, record: &[u8]) -> io::Result<WriteReceipt> {
-    match writer.try_write(record).map_err(io::Error::other)? {
+    match writer
+        .try_write_with(
+            record.len(),
+            |destination| std::io::Write::write_all(destination, record),
+            || {},
+        )
+        .map_err(io::Error::other)?
+    {
         WriteOutcome::Committed(receipt) => Ok(receipt),
         WriteOutcome::Full => Err(io::Error::other(
             "Empty generated Plugin test Queue rejected one record",

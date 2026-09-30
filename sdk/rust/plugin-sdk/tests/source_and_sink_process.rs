@@ -43,12 +43,16 @@ fn channels(_working: &Path) -> Vec<FlowChannel> {
 fn write(peer: &Peer, value: &str) -> Result<(), Error> {
     let mut writer = peer.egress(0)?;
     assert!(matches!(
-        writer.try_write(
-            &sink::EgressRecord {
-                payload: value.to_owned().encode_to_vec().into()
-            }
-            .encode_to_vec()
-        )?,
+        {
+            let record = sink::EgressRecord {
+                payload: value.to_owned().encode_to_vec().into(),
+            };
+            writer.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     Ok(())
@@ -102,13 +106,17 @@ async fn one_shared_owner_keeps_sink_and_completion_alive_through_source_quiesce
     )?;
     released(&peer).await?;
     assert!(matches!(
-        peer.writer()?.try_write(
-            &source::IngressCompletion {
+        {
+            let record = source::IngressCompletion {
                 record_id: record.record_id,
-                status: 1
-            }
-            .encode_to_vec()
-        )?,
+                status: 1,
+            };
+            peer.writer()?.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     let completion_event = match vector["completionAfterQuiesce"].as_str() {
@@ -179,13 +187,17 @@ async fn combined_program_with_only_source_bound_submits_and_closes_without_sink
     })
     .await??;
     assert!(matches!(
-        peer.writer()?.try_write(
-            &source::IngressCompletion {
+        {
+            let record = source::IngressCompletion {
                 record_id: record.record_id,
-                status: 1
-            }
-            .encode_to_vec()
-        )?,
+                status: 1,
+            };
+            peer.writer()?.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     peer.event("result 0 Ok(Ok)").await?;
@@ -289,12 +301,16 @@ async fn sink_failure_interrupts_source_quiesce_waiting_for_queue_space() -> Res
     peer.event("source-quiesce").await?;
     let mut writer = bells.egress(directory.path(), &channels[0])?;
     assert!(matches!(
-        writer.try_write(
-            &sink::EgressRecord {
-                payload: "fail".to_owned().encode_to_vec().into()
-            }
-            .encode_to_vec()
-        )?,
+        {
+            let record = sink::EgressRecord {
+                payload: "fail".to_owned().encode_to_vec().into(),
+            };
+            writer.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     let events = peer.exit(ExpectedExit::Failure).await?;

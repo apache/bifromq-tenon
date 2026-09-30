@@ -127,13 +127,17 @@ fn read(reader: &mut Reader) -> Result<IngressRecord, Error> {
 
 fn complete(writer: &mut Writer, id: u64, status: i32) -> Result<(), Error> {
     assert!(matches!(
-        writer.try_write(
-            &IngressCompletion {
+        {
+            let record = IngressCompletion {
                 record_id: id,
-                status
-            }
-            .encode_to_vec()
-        )?,
+                status,
+            };
+            writer.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     Ok(())
@@ -240,6 +244,100 @@ fn dropped_result_retains_admission_until_real_completion_and_channels_are_indep
 }
 
 #[test]
+fn full_submission_retains_payload_until_commit_or_close() -> Result<(), Error> {
+    for resume in [false, true] {
+        let directory = tempfile::tempdir()?;
+        queues(directory.path(), 1, 1, 64)?;
+        let bells = Bells::create(directory.path(), 1)?;
+        let path = directory.path().join("submission-0.queue");
+        // A previous session can leave the Queue full despite fresh permits.
+        let mut previous = Writer::open(
+            &path,
+            bells.loops.loop_bell(0)?,
+            Arc::clone(&bells.channels),
+        )?;
+        for _ in 0..2 {
+            assert!(matches!(
+                previous.try_write_with(
+                    [42; 64].len(),
+                    |destination| std::io::Write::write_all(destination, &[42; 64]),
+                    || {}
+                )?,
+                WriteOutcome::Committed(_)
+            ));
+        }
+        let expected_id = previous.committed_position()?.get() + 1;
+        drop(previous);
+        let (failed, _received) = failures();
+        let mut session = Session::open(directory.path(), &bells.channels_path, failed)?;
+        let payload = Bytes::from(vec![7; 32]);
+        let result = session.shared.send(0, |_| Ok(payload.clone()))?;
+        let shared = Arc::clone(&session.shared);
+        let channel = &shared.channels[0];
+        let start = Instant::now();
+        while channel.state.lock().expect("test mutex").pending.is_empty() {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "record was not held"
+            );
+            thread::yield_now();
+        }
+        assert!(!payload.is_unique());
+        assert_eq!(channel.permits.available_permits(), 0);
+        if resume {
+            let mut reader = bells.read_submission(0)?;
+            for _ in 0..2 {
+                assert!(matches!(reader.try_read()?, ReadOutcome::Record(_)));
+                reader.release(1)?;
+            }
+            let record = read(&mut reader)?;
+            assert_eq!(record.record_id, expected_id);
+            assert_eq!(record.payload, payload);
+            assert_eq!(channel.permits.available_permits(), 0);
+            let mut completion = bells.write_completion(0)?;
+            complete(&mut completion, record.record_id, 1)?;
+            assert_eq!(result.wait()?, AckCode::Ok);
+            session.close()?;
+        } else {
+            session.close()?;
+            assert!(
+                result
+                    .wait()
+                    .expect_err("close fails an uncommitted request")
+                    .is_session_closed()
+            );
+        }
+        assert!(payload.is_unique(), "the held payload must be released");
+        assert_eq!(channel.permits.available_permits(), 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn direct_submission_encoding_preserves_empty_and_varint_boundaries() -> Result<(), Error> {
+    let directory = tempfile::tempdir()?;
+    queues(directory.path(), 1, 1, 65_560)?;
+    let bells = Bells::create(directory.path(), 1)?;
+    let (failed, _received) = failures();
+    let mut session = Session::open(directory.path(), &bells.channels_path, failed)?;
+    let sender = session.sender::<Vec<u8>>();
+    let mut reader = bells.read_submission(0)?;
+    let mut completion_writer = bells.write_completion(0)?;
+    for length in [
+        0, 125, 126, 127, 128, 16_380, 16_381, 16_383, 16_384, 65_536,
+    ] {
+        let payload = vec![42; length];
+        let completion = sender.send(0, &payload)?;
+        let record = read(&mut reader)?;
+        assert_eq!(record.payload.as_ref(), payload.encode_to_vec());
+        complete(&mut completion_writer, record.record_id, 1)?;
+        assert_eq!(completion.wait()?, AckCode::Ok);
+    }
+    session.close()?;
+    Ok(())
+}
+
+#[test]
 fn failed_encoding_and_complete_record_limit_return_admission_without_commit() -> Result<(), Error>
 {
     let directory = tempfile::tempdir()?;
@@ -263,6 +361,14 @@ fn failed_encoding_and_complete_record_limit_return_admission_without_commit() -
         ReadOutcome::Empty
     ));
     assert_eq!(shared.permits.available_permits(), 1);
+    // Twelve payload bytes plus the two one-byte keys, id and length fill 16 bytes.
+    let accepted = session
+        .shared
+        .send(0, |_| Ok(Bytes::from_static(&[7; 12])))?;
+    let record = read(&mut bells.read_submission(0)?)?;
+    assert_eq!(record.encoded_len(), 16);
+    complete(&mut bells.write_completion(0)?, record.record_id, 1)?;
+    assert_eq!(accepted.wait()?, AckCode::Ok);
     session.close()?;
     Ok(())
 }

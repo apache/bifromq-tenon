@@ -173,7 +173,12 @@ fn run_producer(case: Case) -> Result<serde_json::Value, Box<dyn Error>> {
         let record_started = Instant::now();
         match writer.as_mut() {
             Some(writer) => {
-                let WriteOutcome::Committed(receipt) = writer.try_write(&payload)? else {
+                let WriteOutcome::Committed(receipt) = writer.try_write_with(
+                    payload.len(),
+                    |destination| std::io::Write::write_all(destination, &payload),
+                    || {},
+                )?
+                else {
                     return Err("single in-flight record unexpectedly filled the Queue".into());
                 };
                 if writer.wait_released(&receipt)? != WaitOutcome::Ready {

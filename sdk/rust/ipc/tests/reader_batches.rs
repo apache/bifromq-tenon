@@ -49,7 +49,11 @@ fn a_batch_checkpoint_releases_only_its_copied_prefix() -> io::Result<()> {
     let (directory, mut writer, mut reader) = queue_pair(64, 24)?;
     for value in [1, 2, 3] {
         assert!(matches!(
-            writer.try_write(&[value; 8])?,
+            writer.try_write_with(
+                [value; 8].len(),
+                |destination| std::io::Write::write_all(destination, &[value; 8]),
+                || {}
+            )?,
             WriteOutcome::Committed(_)
         ));
     }
@@ -72,7 +76,11 @@ fn a_batch_checkpoint_releases_only_its_copied_prefix() -> io::Result<()> {
     }
     replay.release(2)?;
     assert!(matches!(
-        writer.try_write(&[9; 24])?,
+        writer.try_write_with(
+            [9; 24].len(),
+            |destination| std::io::Write::write_all(destination, &[9; 24]),
+            || {}
+        )?,
         WriteOutcome::Committed(_)
     ));
     assert_eq!(first.payload(), &[1; 8]);
@@ -86,7 +94,11 @@ fn a_pending_interrupt_precedes_ready_data_and_space() -> io::Result<()> {
     writer.wait_interrupter().interrupt()?;
     assert_eq!(writer.wait_writable(8)?, WaitOutcome::Interrupted);
     reader.wait_interrupter().interrupt()?;
-    writer.try_write(&[1; 8])?;
+    writer.try_write_with(
+        [1; 8].len(),
+        |destination| std::io::Write::write_all(destination, &[1; 8]),
+        || {},
+    )?;
     assert_eq!(reader.wait_readable()?, WaitOutcome::Interrupted);
     assert_eq!(reader.wait_readable()?, WaitOutcome::Ready);
     Ok(())

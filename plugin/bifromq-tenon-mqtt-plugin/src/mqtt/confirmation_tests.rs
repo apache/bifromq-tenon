@@ -74,15 +74,18 @@ pub(super) fn try_submission(submission: &mut QueueReader) -> Option<(u64, Sourc
 /// Commits the terminal result the Flow Channel loop would write.
 pub(super) fn complete_record(completion: &mut QueueWriter, record_id: u64) {
     assert!(matches!(
-        completion
-            .try_write(
-                &IngressCompletion {
-                    record_id,
-                    status: 1,
-                }
-                .encode_to_vec()
+        {
+            let record = IngressCompletion {
+                record_id,
+                status: 1,
+            };
+            completion.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
             )
-            .expect("Completion Queue"),
+        }
+        .expect("Completion Queue"),
         WriteOutcome::Committed(_)
     ));
 }

@@ -44,8 +44,23 @@ enum Layout {
 fn producer_crash_preserves_only_committed_records() -> Result<(), Box<dyn Error>> {
     if let Some(point) = std::env::var_os(POINT_ENV) {
         let path = std::env::var_os(PATH_ENV).ok_or("missing child Queue path")?;
-        let memory = CrashMemory::open(Path::new(&path), OpenRole::Writer, point)?;
-        let _ = WriterCore::new(memory).try_write(PAYLOAD)?;
+        let memory = CrashMemory::open(Path::new(&path), OpenRole::Writer, point.clone())?;
+        let mut writer = WriterCore::new(memory);
+        let _ = writer.try_write_with(
+            PAYLOAD.len(),
+            |destination| {
+                destination.write_all(&PAYLOAD[..4])?;
+                // Pause the real encoder while it still borrows mapped bytes.
+                if point == "write_body_half" {
+                    std::fs::write(Path::new(&path).with_extension("ready"), b"ready")?;
+                    loop {
+                        std::thread::park();
+                    }
+                }
+                destination.write_all(&PAYLOAD[4..])
+            },
+            || {},
+        )?;
         return Err("producer did not reach its crash point".into());
     }
     for layout in [Layout::Plain, Layout::Wrap] {
@@ -119,7 +134,11 @@ fn consumer_crash_replays_until_shared_release() -> Result<(), Box<dyn Error>> {
             let region = seed_queue(&path, layout)?;
             let mut writer = open_writer(&path, &region)?;
             assert!(matches!(
-                writer.try_write(PAYLOAD)?,
+                writer.try_write_with(
+                    PAYLOAD.len(),
+                    |destination| std::io::Write::write_all(destination, PAYLOAD),
+                    || {}
+                )?,
                 WriteOutcome::Committed(_)
             ));
             let mut reader = open_reader(&path, &region)?;
@@ -165,7 +184,11 @@ fn peer_killed_between_ring_and_wake_leaves_a_recoverable_doorbell() -> Result<(
         // The kill lands after this peer published its ring and before its wake
         // reached the kernel, so the call below never returns.
         crate::bell::park_next_platform_wake();
-        let _ = writer.try_write(PAYLOAD)?;
+        let _ = writer.try_write_with(
+            PAYLOAD.len(),
+            |destination| std::io::Write::write_all(destination, PAYLOAD),
+            || {},
+        )?;
         return Err(format!("the child never parked at {point:?}").into());
     }
     let directory = tempfile::tempdir()?;
@@ -260,13 +283,21 @@ fn seed_queue(path: &Path, layout: Layout) -> Result<Arc<BellRegion>, Box<dyn Er
         // A released 32-byte frame leaves the live prefix at offset 32 and the
         // next append at offset 56, forcing an 8-byte wrap before the candidate.
         assert!(matches!(
-            writer.try_write(&[b'x'; 24])?,
+            writer.try_write_with(
+                [b'x'; 24].len(),
+                |destination| std::io::Write::write_all(destination, &[b'x'; 24]),
+                || {}
+            )?,
             WriteOutcome::Committed(_)
         ));
         read_payload(&mut open_reader(path, &region)?, &[b'x'; 24])?;
     }
     assert!(matches!(
-        writer.try_write(PREFIX)?,
+        writer.try_write_with(
+            PREFIX.len(),
+            |destination| std::io::Write::write_all(destination, PREFIX),
+            || {}
+        )?,
         WriteOutcome::Committed(_)
     ));
     Ok(region)
@@ -330,7 +361,11 @@ fn verify_reusable(
 ) -> Result<(), Box<dyn Error>> {
     let mut writer = open_writer(path, region)?;
     assert!(matches!(
-        writer.try_write(b"recovered")?,
+        writer.try_write_with(
+            b"recovered".len(),
+            |destination| std::io::Write::write_all(destination, b"recovered"),
+            || {}
+        )?,
         WriteOutcome::Committed(_)
     ));
     read_payload(reader, b"recovered")?;
@@ -497,12 +532,11 @@ impl QueueMemory for CrashMemory {
         Ok(())
     }
     fn write_data(&self, offset: u64, source: &[u8]) -> Result<(), QueueRuntimeError> {
-        // This fixture uses distinct body/padding sizes; the real core still
-        // owns all encoding, offsets, capacity decisions and publication.
+        // This fixture distinguishes header/padding copies; the body goes
+        // through with_data_mut. The real core owns layout and publication.
         let region = match source.len() {
             FRAME_HEADER_LEN if source == [0; FRAME_HEADER_LEN] => "wrap",
             FRAME_HEADER_LEN => "header",
-            9 => "body",
             7 => "padding",
             _ => unreachable!("unexpected crash fixture write"),
         };
@@ -514,5 +548,17 @@ impl QueueMemory for CrashMemory {
             .write_data(offset + half as u64, &source[half..])?;
         self.gate(&format!("write_{region}_after"));
         Ok(())
+    }
+
+    fn with_data_mut<R>(
+        &self,
+        offset: u64,
+        length: usize,
+        write: impl FnOnce(&mut [u8]) -> R,
+    ) -> Result<R, QueueRuntimeError> {
+        self.gate("write_body_before");
+        let result = self.inner.with_data_mut(offset, length, write)?;
+        self.gate("write_body_after");
+        Ok(result)
     }
 }

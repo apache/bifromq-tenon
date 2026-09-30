@@ -250,26 +250,22 @@ impl IngressQueuePair {
             record_id,
             status: status as i32,
         };
-        // The fixed v1 schema fits 13 bytes, including the largest record id.
-        // This buffer stays alive throughout the synchronous capacity wait.
-        let mut storage = [0_u8; COMPLETION_MAX_PAYLOAD_SIZE];
-        let mut remaining = storage.as_mut_slice();
-        #[allow(
-            clippy::expect_used,
-            reason = "the fixed v1 completion schema fits COMPLETION_MAX_PAYLOAD_SIZE"
-        )]
-        completion
-            .encode(&mut remaining)
-            .expect("the fixed v1 completion must fit its maximum payload size");
-        let encoded_len = COMPLETION_MAX_PAYLOAD_SIZE - remaining.len();
-        let encoded = &storage[..encoded_len];
+        let encoded_len = completion.encoded_len();
         loop {
             let outcome = self
                 .completion
-                .try_write_observed(encoded, || {
-                    wait.ready();
-                    metrics.completion(result);
-                })
+                .try_write_with(
+                    encoded_len,
+                    |destination| {
+                        completion
+                            .encode(destination)
+                            .map_err(std::io::Error::other)
+                    },
+                    || {
+                        wait.ready();
+                        metrics.completion(result);
+                    },
+                )
                 .map_err(IngressQueueError::CompletionQueue)?;
             match outcome {
                 WriteOutcome::Committed(_) => {
@@ -277,7 +273,7 @@ impl IngressQueuePair {
                 }
                 WriteOutcome::Full => {
                     wait.blocked();
-                    match self.completion.wait_writable(encoded.len()) {
+                    match self.completion.wait_writable(encoded_len) {
                         Err(source) => {
                             return Err(IngressQueueError::CompletionQueue(source));
                         }

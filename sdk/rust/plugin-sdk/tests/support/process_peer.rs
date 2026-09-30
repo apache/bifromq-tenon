@@ -615,7 +615,11 @@ impl Peer {
                 let mut writer = bells.submission_writer(&working, 0)?;
                 for value in [1, 2] {
                     assert!(matches!(
-                        writer.try_write(&[value; 64])?,
+                        writer.try_write_with(
+                            [value; 64].len(),
+                            |destination| std::io::Write::write_all(destination, &[value; 64]),
+                            || {}
+                        )?,
                         WriteOutcome::Committed(_)
                     ))
                 }

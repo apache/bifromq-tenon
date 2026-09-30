@@ -203,7 +203,13 @@ fn transmit_on_all_channels(state: &Path, channels: usize) -> io::Result<()> {
             &flow_channel_bell_path(pipeline_directory, "loop"),
         )?;
         assert!(matches!(
-            writer.try_write(&record).map_err(io::Error::other)?,
+            writer
+                .try_write_with(
+                    record.len(),
+                    |destination| std::io::Write::write_all(destination, &record),
+                    || {}
+                )
+                .map_err(io::Error::other)?,
             WriteOutcome::Committed(_)
         ));
     }

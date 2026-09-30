@@ -46,7 +46,11 @@ pub(super) fn verify_queue_model(
         match operation % 5 {
             0 => {
                 let before = std::fs::read(&path)?;
-                match writer.try_write(&payload)? {
+                match writer.try_write_with(
+                    payload.len(),
+                    |destination| std::io::Write::write_all(destination, &payload),
+                    || {},
+                )? {
                     WriteOutcome::Committed(_) => unread.push_back(payload),
                     WriteOutcome::Full => assert_eq!(std::fs::read(&path)?, before),
                 }

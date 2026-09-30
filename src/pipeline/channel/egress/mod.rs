@@ -28,6 +28,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -155,9 +156,13 @@ impl EgressRoute {
         for (instance, target) in &mut self.targets {
             let outcome = target
                 .writer
-                .try_write_observed(record.as_bytes(), || {
-                    metrics.egress(&target.metrics, payload_bytes);
-                })
+                .try_write_with(
+                    record.len(),
+                    |destination| Write::write_all(destination, record.as_bytes()),
+                    || {
+                        metrics.egress(&target.metrics, payload_bytes);
+                    },
+                )
                 .map_err(EgressError)?;
             assert!(
                 matches!(outcome, WriteOutcome::Committed(_)),

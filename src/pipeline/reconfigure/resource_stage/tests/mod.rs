@@ -350,13 +350,17 @@ fn stage_neither_executes_program_commands_nor_releases_paused_work() -> TestRes
         0,
         &channel_bells,
     )?;
-    let receipt = match submission.try_write(
-        &IngressRecord {
+    let receipt = match {
+        let record = IngressRecord {
             record_id: 7,
             payload: Vec::new().into(),
-        }
-        .encode_to_vec(),
-    )? {
+        };
+        submission.try_write_with(
+            record.encoded_len(),
+            |destination| record.encode(destination).map_err(std::io::Error::other),
+            || {},
+        )
+    }? {
         WriteOutcome::Committed(receipt) => receipt,
         WriteOutcome::Full => {
             return Err(io::Error::other("Fresh Submission Queue was full").into());
@@ -464,13 +468,17 @@ fn shared_sink_contract_folds_one_payload_root_and_groups_both_instances() -> Te
     let runtime = runtime.activate();
 
     assert!(matches!(
-        submission.try_write(
-            &IngressRecord {
+        {
+            let record = IngressRecord {
                 record_id: 31,
                 payload: Vec::new().into(),
-            }
-            .encode_to_vec(),
-        )?,
+            };
+            submission.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     for gateway_egress in [&mut gateway_b_egress, &mut gateway_c_egress] {
@@ -611,23 +619,31 @@ fn staged_routes_send_only_to_each_flows_declared_instances() -> TestResult {
     let runtime = runtime.activate();
 
     assert!(matches!(
-        gateway_a_submission.try_write(
-            &IngressRecord {
+        {
+            let record = IngressRecord {
                 record_id: 17,
                 payload: Vec::new().into(),
-            }
-            .encode_to_vec(),
-        )?,
+            };
+            gateway_a_submission.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     assert!(matches!(
-        gateway_b_submission.try_write(
-            &IngressRecord {
+        {
+            let record = IngressRecord {
                 record_id: 23,
                 payload: Vec::new().into(),
-            }
-            .encode_to_vec(),
-        )?,
+            };
+            gateway_b_submission.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     let gateway_b_output = EgressRecord::decode(

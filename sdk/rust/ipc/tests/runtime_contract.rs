@@ -20,7 +20,7 @@
 //! Mapped Queue ordering, release, replay, and cross-process wait/wake contracts.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::num::NonZeroU64;
 use std::process::Command;
 use std::thread;
@@ -45,6 +45,143 @@ use doorbell_queue::{
 };
 
 #[test]
+#[allow(
+    clippy::panic,
+    reason = "An encoder invoked on rejection violates this contract test"
+)]
+fn direct_encoding_checks_space_before_calling_and_preserves_wire_bytes() -> io::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("queue.mmap");
+    create_queue_file(
+        &path,
+        DataCapacity::try_from(48).map_err(io::Error::other)?,
+        NonZeroU64::new(16).ok_or(io::Error::other("zero payload limit"))?,
+    )?;
+    let mut writer = open_queue_writer(&path)?;
+    let mut reader = open_queue_reader(&path)?;
+    // Leave only an eight-byte tail, then encode across a wrap on the next pass.
+    for payload in [b"123456789".as_slice(), b"B", b"wrapped-body", b"C"] {
+        let mut calls = 0;
+        let mut commits = 0;
+        let outcome = writer.try_write_with(
+            payload.len(),
+            |destination| {
+                calls += 1;
+                assert_eq!(destination.len(), payload.len());
+                destination.write_all(payload)
+            },
+            || commits += 1,
+        )?;
+        assert!(matches!(outcome, WriteOutcome::Committed(_)));
+        assert_eq!(calls, 1);
+        assert_eq!(commits, 1);
+        let ReadOutcome::Record(record) = reader.try_read()? else {
+            return Err(io::Error::other("encoded record missing"));
+        };
+        assert_eq!(record.payload(), payload);
+        reader.release(1)?;
+    }
+    while matches!(
+        writer.try_write_with(
+            b"A".len(),
+            |destination| std::io::Write::write_all(destination, b"A"),
+            || {}
+        )?,
+        WriteOutcome::Committed(_)
+    ) {}
+    let before = fs::read(&path)?;
+    let bells_before = fs::read(queue_bell_region_path(&path)?)?;
+    assert_eq!(
+        writer.try_write_with(
+            1,
+            |_| panic!("Full must skip the encoder"),
+            || panic!("Full must skip the commit callback"),
+        )?,
+        WriteOutcome::Full
+    );
+    assert_eq!(fs::read(&path)?, before);
+    assert_eq!(fs::read(queue_bell_region_path(&path)?)?, bells_before);
+    for invalid in [0, 17] {
+        assert!(
+            writer
+                .try_write_with(
+                    invalid,
+                    |_| panic!("invalid length must skip the encoder"),
+                    || panic!("invalid length must skip the commit callback")
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(&path)?, before);
+    }
+    Ok(())
+}
+
+#[test]
+#[allow(
+    clippy::panic,
+    reason = "Exercises an unwinding encoder before commit publication"
+)]
+fn direct_encoding_failure_never_publishes_partial_bytes() -> io::Result<()> {
+    for failure in ["error", "short", "panic", "overflow"] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("queue.mmap");
+        create_queue_file(
+            &path,
+            DataCapacity::try_from(48).map_err(io::Error::other)?,
+            NonZeroU64::new(16).ok_or(io::Error::other("zero payload limit"))?,
+        )?;
+        let mut writer = open_queue_writer(&path)?;
+        let mut reader = open_queue_reader(&path)?;
+        writer.try_write_with(
+            b"prefix".len(),
+            |destination| std::io::Write::write_all(destination, b"prefix"),
+            || {},
+        )?;
+        let commit = writer.committed_position()?;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            writer.try_write_with(
+                9,
+                |destination| {
+                    destination.write_all(b"half")?;
+                    match failure {
+                        "error" => Err(io::Error::other("encoder failed")),
+                        "short" => Ok(()),
+                        "panic" => panic!("encoder panicked"),
+                        "overflow" => destination.write_all(b"too-many-bytes"),
+                        _ => unreachable!(),
+                    }
+                },
+                || panic!("encoding failure must skip the commit callback"),
+            )
+        }));
+        match failure {
+            "panic" => assert!(outcome.is_err()),
+            "short" => assert!(matches!(
+                outcome,
+                Ok(Err(QueueRuntimeError::EncodedLengthMismatch))
+            )),
+            _ => assert!(matches!(outcome, Ok(Err(QueueRuntimeError::Encode(_))))),
+        }
+        assert_eq!(writer.committed_position()?, commit);
+        let ReadOutcome::Record(record) = reader.try_read()? else {
+            return Err(io::Error::other("committed prefix missing"));
+        };
+        assert_eq!(record.payload(), b"prefix");
+        reader.release(1)?;
+        assert_eq!(reader.try_read()?, ReadOutcome::Empty);
+        // Recovery reopens the endpoint; uncommitted bytes are reusable.
+        drop(writer);
+        let mut writer = open_queue_writer(&path)?;
+        writer.try_write_with(9, |destination| destination.write_all(b"recovered"), || {})?;
+        let ReadOutcome::Record(record) = reader.try_read()? else {
+            return Err(io::Error::other("recovered record missing"));
+        };
+        assert_eq!(record.payload(), b"recovered");
+    }
+    Ok(())
+}
+
+#[test]
 fn mapped_queue_wraps_without_losing_reader_owned_bytes() -> io::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("queue.mmap");
@@ -56,11 +193,23 @@ fn mapped_queue_wraps_without_losing_reader_owned_bytes() -> io::Result<()> {
     let mut reader = open_queue_reader(&path).map_err(io::Error::other)?;
 
     assert!(matches!(
-        writer.try_write(b"record-one").map_err(io::Error::other)?,
+        writer
+            .try_write_with(
+                b"record-one".len(),
+                |destination| std::io::Write::write_all(destination, b"record-one"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     assert!(matches!(
-        writer.try_write(b"B").map_err(io::Error::other)?,
+        writer
+            .try_write_with(
+                b"B".len(),
+                |destination| std::io::Write::write_all(destination, b"B"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
 
@@ -71,7 +220,13 @@ fn mapped_queue_wraps_without_losing_reader_owned_bytes() -> io::Result<()> {
     reader.release(1).map_err(io::Error::other)?;
 
     assert!(matches!(
-        writer.try_write(b"record-two").map_err(io::Error::other)?,
+        writer
+            .try_write_with(
+                b"record-two".len(),
+                |destination| std::io::Write::write_all(destination, b"record-two"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     assert_eq!(first.payload(), b"record-one");
@@ -102,13 +257,23 @@ fn write_receipts_follow_the_shared_release_prefix() -> io::Result<()> {
     let mut writer = open_queue_writer(&path).map_err(io::Error::other)?;
     let mut reader = open_queue_reader(&path).map_err(io::Error::other)?;
 
-    let WriteOutcome::Committed(first_receipt) =
-        writer.try_write(b"A").map_err(io::Error::other)?
+    let WriteOutcome::Committed(first_receipt) = writer
+        .try_write_with(
+            b"A".len(),
+            |destination| std::io::Write::write_all(destination, b"A"),
+            || {},
+        )
+        .map_err(io::Error::other)?
     else {
         return Err(io::Error::other("first record was not committed"));
     };
-    let WriteOutcome::Committed(second_receipt) =
-        writer.try_write(b"B").map_err(io::Error::other)?
+    let WriteOutcome::Committed(second_receipt) = writer
+        .try_write_with(
+            b"B".len(),
+            |destination| std::io::Write::write_all(destination, b"B"),
+            || {},
+        )
+        .map_err(io::Error::other)?
     else {
         return Err(io::Error::other("second record was not committed"));
     };
@@ -163,14 +328,25 @@ fn write_receipts_are_bound_to_one_opened_writer() -> io::Result<()> {
     create_queue_file(&second_path, capacity, max_payload_size).map_err(io::Error::other)?;
 
     let mut first_writer = open_queue_writer(&first_path).map_err(io::Error::other)?;
-    let WriteOutcome::Committed(receipt) =
-        first_writer.try_write(b"A").map_err(io::Error::other)?
+    let WriteOutcome::Committed(receipt) = first_writer
+        .try_write_with(
+            b"A".len(),
+            |destination| std::io::Write::write_all(destination, b"A"),
+            || {},
+        )
+        .map_err(io::Error::other)?
     else {
         return Err(io::Error::other("first record was not committed"));
     };
     let mut second_writer = open_queue_writer(&second_path).map_err(io::Error::other)?;
     assert!(matches!(
-        second_writer.try_write(b"B").map_err(io::Error::other)?,
+        second_writer
+            .try_write_with(
+                b"B".len(),
+                |destination| std::io::Write::write_all(destination, b"B"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     let mut second_reader = open_queue_reader(&second_path).map_err(io::Error::other)?;
@@ -210,11 +386,23 @@ fn wrapped_write_receipt_includes_the_skipped_tail() -> io::Result<()> {
     let mut reader = open_queue_reader(&path).map_err(io::Error::other)?;
 
     assert!(matches!(
-        writer.try_write(b"record-one").map_err(io::Error::other)?,
+        writer
+            .try_write_with(
+                b"record-one".len(),
+                |destination| std::io::Write::write_all(destination, b"record-one"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     assert!(matches!(
-        writer.try_write(b"B").map_err(io::Error::other)?,
+        writer
+            .try_write_with(
+                b"B".len(),
+                |destination| std::io::Write::write_all(destination, b"B"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     assert!(matches!(
@@ -223,8 +411,13 @@ fn wrapped_write_receipt_includes_the_skipped_tail() -> io::Result<()> {
     ));
     reader.release(1).map_err(io::Error::other)?;
 
-    let WriteOutcome::Committed(wrapped_receipt) =
-        writer.try_write(b"record-two").map_err(io::Error::other)?
+    let WriteOutcome::Committed(wrapped_receipt) = writer
+        .try_write_with(
+            b"record-two".len(),
+            |destination| std::io::Write::write_all(destination, b"record-two"),
+            || {},
+        )
+        .map_err(io::Error::other)?
     else {
         return Err(io::Error::other("wrapped record was not committed"));
     };
@@ -260,7 +453,14 @@ fn wait_released_wakes_when_the_reader_releases_the_receipt() -> io::Result<()> 
     let max_payload_size = NonZeroU64::new(8).ok_or(io::Error::other("zero payload limit"))?;
     create_queue_file(&path, capacity, max_payload_size).map_err(io::Error::other)?;
     let mut writer = open_queue_writer(&path).map_err(io::Error::other)?;
-    let WriteOutcome::Committed(receipt) = writer.try_write(b"A").map_err(io::Error::other)? else {
+    let WriteOutcome::Committed(receipt) = writer
+        .try_write_with(
+            b"A".len(),
+            |destination| std::io::Write::write_all(destination, b"A"),
+            || {},
+        )
+        .map_err(io::Error::other)?
+    else {
         return Err(io::Error::other("record was not committed"));
     };
     let mut reader = open_queue_reader(&path).map_err(io::Error::other)?;
@@ -294,7 +494,14 @@ fn local_interrupter_wakes_a_writer_waiting_for_release() -> io::Result<()> {
     let max_payload_size = NonZeroU64::new(8).ok_or(io::Error::other("zero payload limit"))?;
     create_queue_file(&path, capacity, max_payload_size).map_err(io::Error::other)?;
     let mut writer = open_queue_writer(&path).map_err(io::Error::other)?;
-    let WriteOutcome::Committed(receipt) = writer.try_write(b"A").map_err(io::Error::other)? else {
+    let WriteOutcome::Committed(receipt) = writer
+        .try_write_with(
+            b"A".len(),
+            |destination| std::io::Write::write_all(destination, b"A"),
+            || {},
+        )
+        .map_err(io::Error::other)?
+    else {
         return Err(io::Error::other("record was not committed"));
     };
     let interrupter = writer.wait_interrupter();
@@ -326,16 +533,34 @@ fn full_write_does_not_change_any_queue_byte() -> io::Result<()> {
     let mut writer = open_queue_writer(&path).map_err(io::Error::other)?;
 
     assert!(matches!(
-        writer.try_write(b"A").map_err(io::Error::other)?,
+        writer
+            .try_write_with(
+                b"A".len(),
+                |destination| std::io::Write::write_all(destination, b"A"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     assert!(matches!(
-        writer.try_write(b"B").map_err(io::Error::other)?,
+        writer
+            .try_write_with(
+                b"B".len(),
+                |destination| std::io::Write::write_all(destination, b"B"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     let before = fs::read(&path)?;
     assert_eq!(
-        writer.try_write(b"C").map_err(io::Error::other)?,
+        writer
+            .try_write_with(
+                b"C".len(),
+                |destination| std::io::Write::write_all(destination, b"C"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Full
     );
     assert_eq!(fs::read(path)?, before);
@@ -437,7 +662,13 @@ fn reading_rejects_corrupt_committed_frame_bytes() -> io::Result<()> {
     let max_payload_size = NonZeroU64::new(8).ok_or(io::Error::other("zero payload limit"))?;
     create_queue_file(&path, capacity, max_payload_size).map_err(io::Error::other)?;
     let mut writer = open_queue_writer(&path).map_err(io::Error::other)?;
-    writer.try_write(b"A").map_err(io::Error::other)?;
+    writer
+        .try_write_with(
+            b"A".len(),
+            |destination| std::io::Write::write_all(destination, b"A"),
+            || {},
+        )
+        .map_err(io::Error::other)?;
     drop(writer);
 
     let mut bytes = fs::read(&path)?;
@@ -460,7 +691,13 @@ fn unreleased_record_is_replayed_after_reader_reopens() -> io::Result<()> {
     let max_payload_size = NonZeroU64::new(8).ok_or(io::Error::other("zero payload limit"))?;
     create_queue_file(&path, capacity, max_payload_size).map_err(io::Error::other)?;
     let mut writer = open_queue_writer(&path).map_err(io::Error::other)?;
-    writer.try_write(b"A").map_err(io::Error::other)?;
+    writer
+        .try_write_with(
+            b"A".len(),
+            |destination| std::io::Write::write_all(destination, b"A"),
+            || {},
+        )
+        .map_err(io::Error::other)?;
 
     let mut reader = open_queue_reader(&path).map_err(io::Error::other)?;
     let ReadOutcome::Record(record) = reader.try_read().map_err(io::Error::other)? else {
@@ -493,7 +730,13 @@ fn invalid_release_count_does_not_publish_capacity() -> io::Result<()> {
     let max_payload_size = NonZeroU64::new(8).ok_or(io::Error::other("zero payload limit"))?;
     create_queue_file(&path, capacity, max_payload_size).map_err(io::Error::other)?;
     let mut writer = open_queue_writer(&path).map_err(io::Error::other)?;
-    writer.try_write(b"A").map_err(io::Error::other)?;
+    writer
+        .try_write_with(
+            b"A".len(),
+            |destination| std::io::Write::write_all(destination, b"A"),
+            || {},
+        )
+        .map_err(io::Error::other)?;
 
     let mut reader = open_queue_reader(&path).map_err(io::Error::other)?;
     assert!(matches!(
@@ -549,7 +792,14 @@ fn mapped_writer_and_reader_preserve_order_across_threads() -> io::Result<()> {
             let record = sequence.to_le_bytes();
             let mut committed = false;
             for _ in 0..MAX_ATTEMPTS_WITHOUT_PROGRESS {
-                match writer.try_write(&record).map_err(io::Error::other)? {
+                match writer
+                    .try_write_with(
+                        record.len(),
+                        |destination| std::io::Write::write_all(destination, &record),
+                        || {},
+                    )
+                    .map_err(io::Error::other)?
+                {
                     WriteOutcome::Committed(_) => {
                         committed = true;
                         break;
@@ -630,7 +880,11 @@ fn write_from_process_environment() -> io::Result<()> {
     let mut writer = open_queue_writer(path).map_err(io::Error::other)?;
     assert!(matches!(
         writer
-            .try_write(payload.as_bytes())
+            .try_write_with(
+                payload.len(),
+                |destination| std::io::Write::write_all(destination, payload.as_bytes()),
+                || {}
+            )
             .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
@@ -676,7 +930,13 @@ fn local_interrupt_before_wait_coalesces_without_changing_queue_bytes() -> io::R
 
     let mut writer = open_queue_writer(&path).map_err(io::Error::other)?;
     assert!(matches!(
-        writer.try_write(b"A").map_err(io::Error::other)?,
+        writer
+            .try_write_with(
+                b"A".len(),
+                |destination| std::io::Write::write_all(destination, b"A"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     assert_eq!(
@@ -722,7 +982,13 @@ fn local_interrupter_wakes_a_blocked_writer() -> io::Result<()> {
     create_queue_file(&path, capacity, max_payload_size).map_err(io::Error::other)?;
     let mut writer = open_queue_writer(&path).map_err(io::Error::other)?;
     assert!(matches!(
-        writer.try_write(b"full").map_err(io::Error::other)?,
+        writer
+            .try_write_with(
+                b"full".len(),
+                |destination| std::io::Write::write_all(destination, b"full"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     let interrupter = writer.wait_interrupter();
@@ -779,7 +1045,13 @@ fn mapped_waits_across_processes() -> io::Result<()> {
     )?;
     let mut data_writer = open_queue_writer(&data_path).map_err(io::Error::other)?;
     assert!(matches!(
-        data_writer.try_write(b"data").map_err(io::Error::other)?,
+        data_writer
+            .try_write_with(
+                b"data".len(),
+                |destination| std::io::Write::write_all(destination, b"data"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     data_child.wait()?;
@@ -789,7 +1061,13 @@ fn mapped_waits_across_processes() -> io::Result<()> {
     create_queue_file(&space_path, capacity, max_payload_size).map_err(io::Error::other)?;
     let mut space_writer = open_queue_writer(&space_path).map_err(io::Error::other)?;
     assert!(matches!(
-        space_writer.try_write(b"full").map_err(io::Error::other)?,
+        space_writer
+            .try_write_with(
+                b"full".len(),
+                |destination| std::io::Write::write_all(destination, b"full"),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ));
     drop(space_writer);
@@ -830,7 +1108,14 @@ fn mapped_wait_stress_preserves_order_without_polling() -> io::Result<()> {
         for sequence in 0..RECORD_COUNT {
             let record = sequence.to_le_bytes();
             loop {
-                match writer.try_write(&record).map_err(io::Error::other)? {
+                match writer
+                    .try_write_with(
+                        record.len(),
+                        |destination| std::io::Write::write_all(destination, &record),
+                        || {},
+                    )
+                    .map_err(io::Error::other)?
+                {
                     WriteOutcome::Committed(_) => break,
                     WriteOutcome::Full => match writer
                         .wait_writable(record.len())
@@ -910,7 +1195,11 @@ fn run_wait_child(mode: &std::ffi::OsStr) -> io::Result<()> {
             }
             assert!(matches!(
                 writer
-                    .try_write(payload.as_bytes())
+                    .try_write_with(
+                        payload.len(),
+                        |destination| std::io::Write::write_all(destination, payload.as_bytes()),
+                        || {}
+                    )
                     .map_err(io::Error::other)?,
                 WriteOutcome::Committed(_)
             ));

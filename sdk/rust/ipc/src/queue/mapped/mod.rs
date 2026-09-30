@@ -101,6 +101,10 @@ pub enum QueueRuntimeError {
     MappingRangeInvalid,
     /// A write receipt was used with a different opened writer.
     WriteReceiptOwnerMismatch,
+    /// The record encoder failed before publication.
+    Encode(io::Error),
+    /// The encoder returned successfully without consuming the complete body.
+    EncodedLengthMismatch,
 }
 
 impl fmt::Display for QueueRuntimeError {
@@ -126,6 +130,10 @@ impl fmt::Display for QueueRuntimeError {
             Self::WriteReceiptOwnerMismatch => {
                 formatter.write_str("IPC Queue write receipt belongs to another writer")
             }
+            Self::Encode(error) => write!(formatter, "IPC Queue record encoding failed: {error}"),
+            Self::EncodedLengthMismatch => {
+                formatter.write_str("IPC Queue encoder did not fill the declared record length")
+            }
         }
     }
 }
@@ -136,11 +144,13 @@ impl Error for QueueRuntimeError {
             Self::Io { source, .. } => Some(source),
             Self::Format(error) => Some(error),
             Self::Bell(error) => Some(error),
+            Self::Encode(error) => Some(error),
             Self::InvalidReleaseCount
             | Self::CommitRegressed
             | Self::FrameChangedDuringRead
             | Self::MappingRangeInvalid
-            | Self::WriteReceiptOwnerMismatch => None,
+            | Self::WriteReceiptOwnerMismatch
+            | Self::EncodedLengthMismatch => None,
         }
     }
 }
@@ -367,32 +377,34 @@ impl QueueWriter {
         self.core.memory.wait_interrupter()
     }
 
-    /// Tries once to publish one non-empty record without waiting.
+    /// Encodes one complete record directly into available Queue space.
     ///
-    /// [`WriteOutcome::Full`] is normal backpressure and changes no Queue byte.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`QueueRuntimeError`] for an invalid record, corrupt live state,
-    /// exhausted logical position, an internal mapped-range violation, or a
-    /// notification failure. Any error is terminal for this Queue and must not
-    /// be retried; a notification error can occur after `commit` is visible.
-    pub fn try_write(&mut self, record: &[u8]) -> Result<WriteOutcome, QueueRuntimeError> {
-        self.core.try_write(record)
-    }
-
-    /// Reports a physical commit before its potentially failing wake operation.
+    /// `record_len` is the exact encoded body length. The encoder runs
+    /// synchronously at most once, only when the complete frame fits, and must
+    /// advance the supplied slice by exactly that length. The slice covers
+    /// only this record's body and cannot outlive the call. No encoder or
+    /// captured data is retained. On [`WriteOutcome::Full`] it is not called
+    /// and no Queue byte or notification changes. After publishing commit,
+    /// `on_committed` runs exactly once before notifying the reader, even when
+    /// that notification subsequently fails. It is skipped on Full or encoding
+    /// failure. Neither callback is retained. Both must return promptly, and
+    /// `on_committed` must not panic.
     ///
     /// # Errors
     ///
-    /// Has the same terminal errors as [`Self::try_write`]. The callback runs
-    /// after commit publication even when the subsequent wake fails.
-    pub fn try_write_observed(
+    /// Returns an error for an invalid record, corrupt live state, exhausted
+    /// logical position, a mapped-range violation, or notification failure.
+    /// Queue errors are terminal for the current use. An encoder
+    /// error, panic, or length mismatch leaves commit unchanged; partially
+    /// written free space remains invisible to readers. Notification errors
+    /// can occur after commit, so an error must not trigger an automatic retry.
+    pub fn try_write_with(
         &mut self,
-        record: &[u8],
-        committed: impl FnOnce(),
+        record_len: usize,
+        encode: impl FnOnce(&mut &mut [u8]) -> io::Result<()>,
+        on_committed: impl FnOnce(),
     ) -> Result<WriteOutcome, QueueRuntimeError> {
-        self.core.try_write_observed(record, committed)
+        self.core.try_write_with(record_len, encode, on_committed)
     }
 
     /// Observes this mapping without acquiring another reader or writer endpoint.
@@ -457,7 +469,7 @@ impl QueueWriter {
     ///
     /// This method never writes a record. Under the required single-writer
     /// ownership, [`WaitOutcome::Ready`] remains true until this writer changes
-    /// `commit`, so the caller can safely retry [`Self::try_write`] with the same
+    /// `commit`, so the caller can safely retry [`Self::try_write_with`] with the same
     /// length. A signal interruption returns control without changing Queue data.
     ///
     /// # Errors
@@ -657,6 +669,14 @@ trait QueueMemory: WaitFront {
         destination: &mut [MaybeUninit<u8>],
     ) -> Result<(), QueueRuntimeError>;
     fn write_data(&self, offset: u64, source: &[u8]) -> Result<(), QueueRuntimeError>;
+    /// Temporarily borrows the released range owned by the one writer.
+    /// The caller must finish the borrow before publishing commit.
+    fn with_data_mut<R>(
+        &self,
+        offset: u64,
+        length: usize,
+        write: impl FnOnce(&mut [u8]) -> R,
+    ) -> Result<R, QueueRuntimeError>;
 }
 
 #[derive(Debug)]
@@ -673,16 +693,13 @@ impl<M: QueueMemory> WriterCore<M> {
         }
     }
 
-    fn try_write(&mut self, record: &[u8]) -> Result<WriteOutcome, QueueRuntimeError> {
-        self.try_write_observed(record, || {})
-    }
-
-    fn try_write_observed(
+    fn try_write_with(
         &mut self,
-        record: &[u8],
+        record_len: usize,
+        encode: impl FnOnce(&mut &mut [u8]) -> io::Result<()>,
         committed: impl FnOnce(),
     ) -> Result<WriteOutcome, QueueRuntimeError> {
-        let decision = append_decision(&self.memory, record.len())?;
+        let decision = append_decision(&self.memory, record_len)?;
         let super::AppendDecision::Ready(plan) = decision else {
             return Ok(WriteOutcome::Full);
         };
@@ -692,7 +709,13 @@ impl<M: QueueMemory> WriterCore<M> {
             self.memory
                 .write_data(plan.write_offset(), &[0_u8; FRAME_HEADER_LEN])?;
         }
-        write_record(&self.memory, plan.frame_offset(), plan.frame_len(), record)?;
+        write_record(
+            &self.memory,
+            plan.frame_offset(),
+            plan.frame_len(),
+            record_len,
+            encode,
+        )?;
         self.memory.publish_commit(plan.next_commit());
         committed();
         self.memory.ring_peer()?;
@@ -924,16 +947,23 @@ fn write_record<M: QueueMemory>(
     memory: &M,
     offset: u64,
     frame_len: usize,
-    record: &[u8],
+    record_len: usize,
+    encode: impl FnOnce(&mut &mut [u8]) -> io::Result<()>,
 ) -> Result<(), QueueRuntimeError> {
-    let record_len = u32::try_from(record.len()).map_err(|_| FormatError::RecordTooLarge)?;
+    let encoded_len = u32::try_from(record_len).map_err(|_| FormatError::RecordTooLarge)?;
     let mut header = [0_u8; FRAME_HEADER_LEN];
-    write_u32(&mut header, 0, record_len);
+    write_u32(&mut header, 0, encoded_len);
     memory.write_data(offset, &header)?;
     let body_offset = checked_data_end(offset, FRAME_HEADER_LEN)?;
-    memory.write_data(body_offset, record)?;
+    memory.with_data_mut(body_offset, record_len, |mut destination| {
+        encode(&mut destination).map_err(QueueRuntimeError::Encode)?;
+        if !destination.is_empty() {
+            return Err(QueueRuntimeError::EncodedLengthMismatch);
+        }
+        Ok(())
+    })??;
     let body_end = FRAME_HEADER_LEN
-        .checked_add(record.len())
+        .checked_add(record_len)
         .ok_or(QueueRuntimeError::MappingRangeInvalid)?;
     let padding_len = frame_len
         .checked_sub(body_end)
@@ -1162,6 +1192,25 @@ impl QueueMemory for MappedQueueMemory {
         copy_to_mapping(&self.mapping, start, source);
         Ok(())
     }
+
+    fn with_data_mut<R>(
+        &self,
+        offset: u64,
+        length: usize,
+        write: impl FnOnce(&mut [u8]) -> R,
+    ) -> Result<R, QueueRuntimeError> {
+        let start = self.data_mapping_offset(offset, length)?;
+        // SAFETY: The checked range lies within the live, initialized file
+        // mapping. The append plan limits it to released space owned by the
+        // unique writer, whose mutable borrow excludes another local append.
+        // Readers copy only committed frames and retain no mapping borrow
+        // after release. Observers read only atomic positions. The callback's
+        // borrow cannot escape and ends before commit is published, including
+        // on error or unwind; incomplete writes are never published.
+        let destination =
+            unsafe { std::slice::from_raw_parts_mut(self.mapping.as_mut_ptr().add(start), length) };
+        Ok(write(destination))
+    }
 }
 
 fn capacity_from_file(file: &File) -> Result<DataCapacity, QueueRuntimeError> {
@@ -1253,9 +1302,10 @@ fn copy_to_mapping(mapping: &MmapRaw, offset: usize, source: &[u8]) {
     // SAFETY: Every caller checks that `offset..offset + source.len()` is inside
     // this live mapping. The pure append plan restricts writes to released
     // capacity owned by the unique writer, and commit is published only after
-    // these copies complete. This module never exposes the destination pointer;
-    // direct external mutation of Runner-private Queue files is outside the API,
-    // so the source and destination cannot overlap.
+    // these copies complete. Callers of this path supply stack frame headers
+    // or static padding, so source and destination cannot overlap. Encoders
+    // borrow only the separate body through with_data_mut. Direct external
+    // mutation of Runner-private Queue files is outside the API.
     unsafe {
         copy_nonoverlapping_bytes(
             source.as_ptr(),
@@ -1496,7 +1546,13 @@ mod tests {
         assert_eq!(std::fs::read(&path)?, before);
 
         assert!(matches!(
-            writer.try_write(b"payload").map_err(io::Error::other)?,
+            writer
+                .try_write_with(
+                    b"payload".len(),
+                    |destination| std::io::Write::write_all(destination, b"payload"),
+                    || {}
+                )
+                .map_err(io::Error::other)?,
             WriteOutcome::Committed(_)
         ));
         assert_eq!(
@@ -1544,7 +1600,13 @@ mod tests {
         });
 
         assert!(matches!(
-            writer.try_write(b"A").map_err(io::Error::other)?,
+            writer
+                .try_write_with(
+                    b"A".len(),
+                    |destination| std::io::Write::write_all(destination, b"A"),
+                    || {}
+                )
+                .map_err(io::Error::other)?,
             WriteOutcome::Committed(_)
         ));
 
@@ -1565,7 +1627,13 @@ mod tests {
         let (mut writer, mut reader, _region) =
             endpoint_pair(directory.path(), "queue.mmap", 32, 8)?;
         assert!(matches!(
-            writer.try_write(b"payload").map_err(io::Error::other)?,
+            writer
+                .try_write_with(
+                    b"payload".len(),
+                    |destination| std::io::Write::write_all(destination, b"payload"),
+                    || {}
+                )
+                .map_err(io::Error::other)?,
             WriteOutcome::Committed(_)
         ));
         let ReadOutcome::Record(record) = reader.try_read().map_err(io::Error::other)? else {
@@ -1588,7 +1656,13 @@ mod tests {
             let mut writer = WriterCore::new(memory.clone());
             let mut reader = ReaderCore::new(memory);
 
-            let writer_thread = thread::spawn(move || writer.try_write(b"A"));
+            let writer_thread = thread::spawn(move || {
+                writer.try_write_with(
+                    b"A".len(),
+                    |destination| std::io::Write::write_all(destination, b"A"),
+                    || {},
+                )
+            });
             let reader_thread = thread::spawn(move || {
                 let outcome = reader.try_read();
                 (reader, outcome)
@@ -1631,14 +1705,22 @@ mod tests {
             let memory = ModelMemory::new();
             let mut writer = WriterCore::new(memory.clone());
             assert!(matches!(
-                writer.try_write(b"A"),
+                writer.try_write_with(
+                    b"A".len(),
+                    |destination| std::io::Write::write_all(destination, b"A"),
+                    || {}
+                ),
                 Ok(WriteOutcome::Committed(_))
             ));
             let mut reader = ReaderCore::new(memory);
 
             let writer_thread = thread::spawn(move || {
                 loop {
-                    match writer.try_write(b"B") {
+                    match writer.try_write_with(
+                        b"B".len(),
+                        |destination| std::io::Write::write_all(destination, b"B"),
+                        || {},
+                    ) {
                         Ok(WriteOutcome::Full) => thread::yield_now(),
                         outcome => return (writer, outcome),
                     }
@@ -1688,7 +1770,11 @@ mod tests {
         loom::model(|| {
             let memory = ModelMemory::new();
             let mut writer = WriterCore::new(memory.clone());
-            let outcome = writer.try_write(b"A");
+            let outcome = writer.try_write_with(
+                b"A".len(),
+                |destination| std::io::Write::write_all(destination, b"A"),
+                || {},
+            );
             assert!(matches!(&outcome, Ok(WriteOutcome::Committed(_))));
             let Some(WriteOutcome::Committed(receipt)) = outcome.ok() else {
                 return;
@@ -1726,7 +1812,11 @@ mod tests {
         loom::model(|| {
             let memory = ModelMemory::new();
             let mut writer = WriterCore::new(memory.clone());
-            let outcome = writer.try_write(b"A");
+            let outcome = writer.try_write_with(
+                b"A".len(),
+                |destination| std::io::Write::write_all(destination, b"A"),
+                || {},
+            );
             assert!(matches!(&outcome, Ok(WriteOutcome::Committed(_))));
             let Some(WriteOutcome::Committed(receipt)) = outcome.ok() else {
                 return;
@@ -1759,7 +1849,11 @@ mod tests {
         loom::model(|| {
             let memory = ModelMemory::new();
             let mut writer = WriterCore::new(memory.clone());
-            let outcome = writer.try_write(b"A");
+            let outcome = writer.try_write_with(
+                b"A".len(),
+                |destination| std::io::Write::write_all(destination, b"A"),
+                || {},
+            );
             assert!(matches!(&outcome, Ok(WriteOutcome::Committed(_))));
             let Some(WriteOutcome::Committed(receipt)) = outcome.ok() else {
                 return;
@@ -1790,7 +1884,13 @@ mod tests {
                 let read = reader.try_read();
                 (wait, read)
             });
-            let writer_thread = thread::spawn(move || writer.try_write(b"A"));
+            let writer_thread = thread::spawn(move || {
+                writer.try_write_with(
+                    b"A".len(),
+                    |destination| std::io::Write::write_all(destination, b"A"),
+                    || {},
+                )
+            });
 
             let writer_result = writer_thread.join();
             assert!(writer_result.is_ok(), "writer thread panicked");
@@ -1836,7 +1936,13 @@ mod tests {
                 );
                 (reader, wait)
             });
-            let writer_thread = thread::spawn(move || writer.try_write(b"A"));
+            let writer_thread = thread::spawn(move || {
+                writer.try_write_with(
+                    b"A".len(),
+                    |destination| std::io::Write::write_all(destination, b"A"),
+                    || {},
+                )
+            });
 
             let writer_result = writer_thread.join();
             assert!(writer_result.is_ok(), "writer thread panicked");
@@ -1866,7 +1972,11 @@ mod tests {
             let memory = ModelMemory::new();
             let mut writer = WriterCore::new(memory.clone());
             assert!(matches!(
-                writer.try_write(b"A"),
+                writer.try_write_with(
+                    b"A".len(),
+                    |destination| std::io::Write::write_all(destination, b"A"),
+                    || {}
+                ),
                 Ok(WriteOutcome::Committed(_))
             ));
             let mut reader = ReaderCore::new(memory);
@@ -1875,7 +1985,11 @@ mod tests {
 
             let writer_thread = thread::spawn(move || {
                 let wait = writer.wait_writable(1);
-                let write = writer.try_write(b"B");
+                let write = writer.try_write_with(
+                    b"B".len(),
+                    |destination| std::io::Write::write_all(destination, b"B"),
+                    || {},
+                );
                 (wait, write)
             });
             let reader_thread = thread::spawn(move || reader.release(1));
@@ -1977,7 +2091,11 @@ mod tests {
             let mut reader = ReaderCore::new(memory);
 
             assert!(matches!(
-                writer.try_write(b"A"),
+                writer.try_write_with(
+                    b"A".len(),
+                    |destination| std::io::Write::write_all(destination, b"A"),
+                    || {}
+                ),
                 Ok(WriteOutcome::Committed(_))
             ));
             assert_eq!(probe.wake_call_count(), 0);
@@ -2179,13 +2297,17 @@ mod tests {
             let mut committed = 0;
             assert!(
                 writer
-                    .try_write_observed(b"A", || {
-                        assert_eq!(
-                            memory.load_commit().ok().map(LogicalPosition::get),
-                            Some(16)
-                        );
-                        committed += 1;
-                    })
+                    .try_write_with(
+                        b"A".len(),
+                        |destination| std::io::Write::write_all(destination, b"A"),
+                        || {
+                            assert_eq!(
+                                memory.load_commit().ok().map(LogicalPosition::get),
+                                Some(16)
+                            );
+                            committed += 1;
+                        }
+                    )
                     .is_err()
             );
             assert_eq!(committed, 1);
@@ -2200,7 +2322,11 @@ mod tests {
                 Err(QueueRuntimeError::InvalidReleaseCount)
             ));
             assert!(matches!(
-                writer.try_write(b"B"),
+                writer.try_write_with(
+                    b"B".len(),
+                    |destination| std::io::Write::write_all(destination, b"B"),
+                    || {}
+                ),
                 Ok(WriteOutcome::Committed(_))
             ));
         });
@@ -2215,14 +2341,22 @@ mod tests {
         assert_eq!(observer.sample(), Some((0, 64)));
         for payload in [&[1; 17][..], &[2][..]] {
             assert!(matches!(
-                writer.try_write(payload),
+                writer.try_write_with(
+                    payload.len(),
+                    |destination| std::io::Write::write_all(destination, payload),
+                    || {}
+                ),
                 Ok(WriteOutcome::Committed(_))
             ));
             assert!(matches!(reader.try_read(), Ok(ReadOutcome::Record(_))));
             reader.release(1).map_err(io::Error::other)?;
         }
         assert!(matches!(
-            writer.try_write(&[3; 17]),
+            writer.try_write_with(
+                [3; 17].len(),
+                |destination| std::io::Write::write_all(destination, &[3; 17]),
+                || {}
+            ),
             Ok(WriteOutcome::Committed(_))
         ));
         assert_eq!(observer.sample(), Some((48, 64)));
@@ -2385,7 +2519,11 @@ mod tests {
         )
         .map_err(io::Error::other)?;
         assert!(matches!(
-            writer.try_write(b"A"),
+            writer.try_write_with(
+                b"A".len(),
+                |destination| std::io::Write::write_all(destination, b"A"),
+                || {}
+            ),
             Ok(WriteOutcome::Committed(_))
         ));
         // No reader ever bound, so the slot the writer rings still names no
@@ -2516,7 +2654,7 @@ mod tests {
         release: LoomAtomicU64,
         bell: ModelBell,
         complete_frame_reads: AtomicUsize,
-        bytes: Vec<UnsafeCell<u8>>,
+        bytes: UnsafeCell<[u8; 16]>,
     }
 
     impl ModelMemory {
@@ -2527,7 +2665,7 @@ mod tests {
                     release: LoomAtomicU64::new(0),
                     bell: ModelBell::new(),
                     complete_frame_reads: AtomicUsize::new(0),
-                    bytes: (0..16).map(|_| UnsafeCell::new(0)).collect(),
+                    bytes: UnsafeCell::new([0; 16]),
                 }),
             }
         }
@@ -2542,7 +2680,7 @@ mod tests {
             let end = start
                 .checked_add(length)
                 .ok_or(QueueRuntimeError::MappingRangeInvalid)?;
-            if end > self.shared.bytes.len() {
+            if end > 16 {
                 return Err(QueueRuntimeError::MappingRangeInvalid);
             }
             Ok(start..end)
@@ -2816,13 +2954,11 @@ mod tests {
                     .complete_frame_reads
                     .fetch_add(1, Ordering::Relaxed);
             }
-            for (destination, source) in destination.iter_mut().zip(&self.shared.bytes[range]) {
-                source.with(|pointer| {
-                    // SAFETY: Loom owns this byte for the closure and verifies
-                    // that commit/release ordering excludes a concurrent writer.
-                    *destination = unsafe { *pointer };
-                });
-            }
+            self.shared.bytes.with(|pointer| {
+                // SAFETY: This one-frame model tracks the entire data region;
+                // commit/release excludes a concurrent writer for this read.
+                destination.copy_from_slice(&(unsafe { &*pointer })[range]);
+            });
             Ok(())
         }
 
@@ -2837,26 +2973,37 @@ mod tests {
                     .complete_frame_reads
                     .fetch_add(1, Ordering::Relaxed);
             }
-            for (destination, source) in destination.iter_mut().zip(&self.shared.bytes[range]) {
-                source.with(|pointer| {
-                    // SAFETY: Loom owns this byte for the closure and verifies
-                    // that commit/release ordering excludes a concurrent writer.
-                    destination.write(unsafe { *pointer });
-                });
-            }
+            self.shared.bytes.with(|pointer| {
+                // SAFETY: Loom checks the same one-frame ownership as read_data.
+                let source = &(unsafe { &*pointer })[range];
+                for (destination, source) in destination.iter_mut().zip(source) {
+                    destination.write(*source);
+                }
+            });
             Ok(())
         }
 
         fn write_data(&self, offset: u64, source: &[u8]) -> Result<(), QueueRuntimeError> {
             let range = self.checked_range(offset, source.len())?;
-            for (source, destination) in source.iter().zip(&self.shared.bytes[range]) {
-                destination.with_mut(|pointer| {
-                    // SAFETY: Loom owns this byte for the closure and verifies
-                    // that commit/release ordering excludes a concurrent reader.
-                    unsafe { *pointer = *source };
-                });
-            }
+            self.shared.bytes.with_mut(|pointer| {
+                // SAFETY: Loom checks exclusive access to this one-frame ring.
+                (unsafe { &mut *pointer })[range].copy_from_slice(source);
+            });
             Ok(())
+        }
+
+        fn with_data_mut<R>(
+            &self,
+            offset: u64,
+            length: usize,
+            write: impl FnOnce(&mut [u8]) -> R,
+        ) -> Result<R, QueueRuntimeError> {
+            let range = self.checked_range(offset, length)?;
+            Ok(self.shared.bytes.with_mut(|pointer| {
+                // SAFETY: The tracked borrow covers the whole callback, so Loom
+                // detects any read before publication or reuse before release.
+                write(&mut (unsafe { &mut *pointer })[range])
+            }))
         }
     }
 }

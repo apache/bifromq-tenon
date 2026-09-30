@@ -677,13 +677,17 @@ async fn read_record(queue: &mut QueueReader) -> TestResult<Vec<u8>> {
 }
 
 fn submit(queue: &mut QueueWriter, record_id: u64) -> TestResult {
-    match queue.try_write(
-        &IngressRecord {
+    match {
+        let record = IngressRecord {
             record_id,
             payload: Vec::new().into(),
-        }
-        .encode_to_vec(),
-    )? {
+        };
+        queue.try_write_with(
+            record.encoded_len(),
+            |destination| record.encode(destination).map_err(std::io::Error::other),
+            || {},
+        )
+    }? {
         WriteOutcome::Committed(_) => Ok(()),
         WriteOutcome::Full => Err("Fresh Submission Queue is full".into()),
     }

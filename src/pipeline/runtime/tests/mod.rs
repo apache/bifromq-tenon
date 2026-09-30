@@ -2045,7 +2045,11 @@ impl SourceEndpoint {
     fn submit_raw_with_receipt(&mut self, encoded: &[u8]) -> io::Result<WriteReceipt> {
         match self
             .submission
-            .try_write(encoded)
+            .try_write_with(
+                encoded.len(),
+                |destination| std::io::Write::write_all(destination, encoded),
+                || {},
+            )
             .map_err(io::Error::other)?
         {
             WriteOutcome::Committed(receipt) => Ok(receipt),

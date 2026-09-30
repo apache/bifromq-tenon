@@ -294,7 +294,13 @@ fn stopped_completion_capacity_wait_retires_gauges_without_a_false_commit() -> i
     let mut previous = source.completion_filler()?;
     let encoded = completion(u64::MAX, IngressCompletionStatus::Error).encode_to_vec();
     while matches!(
-        previous.try_write(&encoded).map_err(io::Error::other)?,
+        previous
+            .try_write_with(
+                encoded.len(),
+                |destination| std::io::Write::write_all(destination, &encoded),
+                || {}
+            )
+            .map_err(io::Error::other)?,
         WriteOutcome::Committed(_)
     ) {}
     drop(previous);
@@ -534,7 +540,11 @@ fn target_capacity_wait_has_no_partial_fanout_and_does_not_block_another_channel
         }
         .encode_to_vec();
         assert!(matches!(
-            previous.try_write(&inherited),
+            previous.try_write_with(
+                inherited.len(),
+                |destination| std::io::Write::write_all(destination, &inherited),
+                || {}
+            ),
             Ok(WriteOutcome::Committed(_))
         ));
         drop(previous);

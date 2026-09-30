@@ -329,17 +329,21 @@ async fn fill_completion(
         assert_eq!(record.record_id, id);
         assert_eq!(record.status(), IngressCompletionStatus::Ok);
     }
-    let WriteOutcome::Committed(receipt) = source.try_write(
-        &IngressRecord {
+    let WriteOutcome::Committed(receipt) = {
+        let record = IngressRecord {
             record_id: 7,
             payload: TestPayload {
                 value: String::from("pending"),
             }
             .encode_to_vec()
             .into(),
-        }
-        .encode_to_vec(),
-    )?
+        };
+        source.try_write_with(
+            record.encoded_len(),
+            |destination| record.encode(destination).map_err(std::io::Error::other),
+            || {},
+        )
+    }?
     else {
         return Err("Pending fixture input could not enter Submission".into());
     };

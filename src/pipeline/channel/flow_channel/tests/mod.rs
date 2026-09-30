@@ -2171,7 +2171,11 @@ impl SourceQueueFixture {
         .encode_to_vec();
         match self
             .submission_writer
-            .try_write(&encoded)
+            .try_write_with(
+                encoded.len(),
+                |destination| std::io::Write::write_all(destination, &encoded),
+                || {},
+            )
             .map_err(io::Error::other)?
         {
             WriteOutcome::Committed(_) => Ok(()),

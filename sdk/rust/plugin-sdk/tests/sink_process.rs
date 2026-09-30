@@ -50,7 +50,11 @@ fn write(peer: &Peer, channel: usize, text: &str) -> Result<(), Error> {
     }
     .encode_to_vec();
     assert!(matches!(
-        writer.try_write(&bytes)?,
+        writer.try_write_with(
+            bytes.len(),
+            |destination| std::io::Write::write_all(destination, &bytes),
+            || {}
+        )?,
         WriteOutcome::Committed(_)
     ));
     Ok(())
@@ -201,7 +205,11 @@ async fn malformed_record_exits_before_business_close_and_keeps_the_record_unrel
     let path = peer.egress_path(0)?;
     let queue = std::fs::File::open(&path)?;
     assert!(matches!(
-        peer.egress(0)?.try_write(&[10, 2, 1])?,
+        peer.egress(0)?.try_write_with(
+            [10, 2, 1].len(),
+            |destination| std::io::Write::write_all(destination, &[10, 2, 1]),
+            || {}
+        )?,
         WriteOutcome::Committed(_)
     ));
     let events = peer.exit(ExpectedExit::Failure).await?;
@@ -324,7 +332,14 @@ async fn a_replacement_process_replays_only_each_queues_unreleased_suffix() -> R
         Peer::start_sink_in(serde_json::json!({}), identities.clone(), directory.path()).await?;
     first.ready().await?;
     assert!(matches!(
-        writers[0].try_write(&encoded("confirmed"))?,
+        {
+            let record_bytes = &encoded("confirmed");
+            writers[0].try_write_with(
+                record_bytes.len(),
+                |destination| std::io::Write::write_all(destination, record_bytes),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     first.event("write main 0 [\"confirmed\"]").await?;
@@ -338,12 +353,26 @@ async fn a_replacement_process_replays_only_each_queues_unreleased_suffix() -> R
     .await?;
     pending.ready().await?;
     assert!(matches!(
-        writers[0].try_write(&encoded("replay-a"))?,
+        {
+            let record_bytes = &encoded("replay-a");
+            writers[0].try_write_with(
+                record_bytes.len(),
+                |destination| std::io::Write::write_all(destination, record_bytes),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     pending.event("write main 0 [\"replay-a\"]").await?;
     assert!(matches!(
-        writers[1].try_write(&encoded("replay-b"))?,
+        {
+            let record_bytes = &encoded("replay-b");
+            writers[1].try_write_with(
+                record_bytes.len(),
+                |destination| std::io::Write::write_all(destination, record_bytes),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     pending.event("write other 0 [\"replay-b\"]").await?;
@@ -370,7 +399,14 @@ async fn a_replacement_process_replays_only_each_queues_unreleased_suffix() -> R
     for (index, writer) in writers.iter_mut().enumerate() {
         let value = format!("after-replacement-{index}");
         assert!(matches!(
-            writer.try_write(&encoded(&value))?,
+            {
+                let record_bytes = &encoded(&value);
+                writer.try_write_with(
+                    record_bytes.len(),
+                    |destination| std::io::Write::write_all(destination, record_bytes),
+                    || {},
+                )
+            }?,
             WriteOutcome::Committed(_)
         ));
         released_path(&peer::sink_queue(directory.path(), &identities[index])).await?;

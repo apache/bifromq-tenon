@@ -156,7 +156,11 @@ async fn shutdown_with_saturated_sink_work_exits_without_releasing_unconfirmed_r
         .collect::<Result<_, Error>>()?;
     for input in inputs {
         assert!(matches!(
-            peer.egress(input)?.try_write(&record)?,
+            peer.egress(input)?.try_write_with(
+                record.len(),
+                |destination| std::io::Write::write_all(destination, &record),
+                || {}
+            )?,
             WriteOutcome::Committed(_)
         ));
     }
@@ -245,7 +249,11 @@ async fn first_connect_is_clean_and_reconnect_follows_configured_clean_start() -
     }
     .encode_to_vec();
     assert!(matches!(
-        peer.egress(0)?.try_write(&record)?,
+        peer.egress(0)?.try_write_with(
+            record.len(),
+            |destination| std::io::Write::write_all(destination, &record),
+            || {}
+        )?,
         WriteOutcome::Committed(_)
     ));
     let Packet::Publish(publish) = timeout(peer::DEADLINE, receive(&mut second)).await?? else {

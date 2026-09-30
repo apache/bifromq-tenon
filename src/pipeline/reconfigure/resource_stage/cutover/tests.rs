@@ -147,13 +147,17 @@ async fn cutover_starts_all_interfaces_with_exact_material_and_keeps_data_paused
         }
 
         let mut submission = source_writer(root, "input", "input-to-dual", 0)?;
-        let receipt = match submission.try_write(
-            &IngressRecord {
+        let receipt = match {
+            let record = IngressRecord {
                 record_id: 7,
                 payload: Vec::new().into(),
-            }
-            .encode_to_vec(),
-        )? {
+            };
+            submission.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }? {
             WriteOutcome::Committed(receipt) => receipt,
             WriteOutcome::Full => return Err("Fresh Submission Queue is full".into()),
         };

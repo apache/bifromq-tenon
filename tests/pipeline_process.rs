@@ -3192,7 +3192,14 @@ fn submit_ingress_payload(
         payload: payload.into(),
     }
     .encode_to_vec();
-    match writer.try_write(&encoded).map_err(io::Error::other)? {
+    match writer
+        .try_write_with(
+            encoded.len(),
+            |destination| std::io::Write::write_all(destination, &encoded),
+            || {},
+        )
+        .map_err(io::Error::other)?
+    {
         WriteOutcome::Committed(_) => Ok(()),
         WriteOutcome::Full => Err(io::Error::other("Submission Queue was unexpectedly full")),
     }

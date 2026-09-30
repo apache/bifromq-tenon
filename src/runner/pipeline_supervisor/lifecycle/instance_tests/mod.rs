@@ -927,13 +927,17 @@ async fn traffic(root: &Path, id: u64) -> TestResult {
         &channel_bells,
     )?;
     assert!(matches!(
-        source.try_write(
-            &IngressRecord {
+        {
+            let record = IngressRecord {
                 record_id: id,
-                payload: Vec::new().into()
-            }
-            .encode_to_vec()
-        )?,
+                payload: Vec::new().into(),
+            };
+            source.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     loop {

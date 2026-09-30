@@ -84,13 +84,17 @@ async fn one_source_preserves_completion_and_cleanup() -> Result<(), Error> {
     peer.quiesce().await?;
     peer.quiesced().await?;
     assert!(matches!(
-        peer.writer()?.try_write(
-            &source::IngressCompletion {
+        {
+            let record = source::IngressCompletion {
                 record_id: record.record_id,
                 status: 1,
-            }
-            .encode_to_vec(),
-        )?,
+            };
+            peer.writer()?.try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
+        }?,
         WriteOutcome::Committed(_)
     ));
     peer.event("source-result Ok(Ok)").await?;
@@ -186,13 +190,17 @@ async fn one_source_can_send_to_every_flow_channel() -> Result<(), Error> {
         let record = submission(&mut reader).await?;
         assert_eq!(Vec::<u8>::decode(record.payload)?, vec![0; 8]);
         assert!(matches!(
-            writer.try_write(
-                &source::IngressCompletion {
+            {
+                let record = source::IngressCompletion {
                     record_id: record.record_id,
                     status: 1,
-                }
-                .encode_to_vec(),
-            )?,
+                };
+                writer.try_write_with(
+                    record.encoded_len(),
+                    |destination| record.encode(destination).map_err(std::io::Error::other),
+                    || {},
+                )
+            }?,
             WriteOutcome::Committed(_)
         ));
     }
@@ -293,13 +301,17 @@ async fn completion_queue_failure_interrupts_start_and_backpressured_quiesce() -
         }
         let mut writer = peer.completion(1)?;
         assert!(matches!(
-            writer.try_write(
-                &source::IngressCompletion {
+            {
+                let record = source::IngressCompletion {
                     record_id: 1,
-                    status: 0
-                }
-                .encode_to_vec()
-            )?,
+                    status: 0,
+                };
+                writer.try_write_with(
+                    record.encoded_len(),
+                    |destination| record.encode(destination).map_err(std::io::Error::other),
+                    || {},
+                )
+            }?,
             WriteOutcome::Committed(_)
         ));
         let events = peer.exit(ExpectedExit::Failure).await?;

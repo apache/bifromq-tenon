@@ -622,7 +622,11 @@ fn seed_full_completion_queue(source: &SourceEndpoint) -> io::Result<Vec<Ingress
             IngressCompletionStatus::Ok,
         );
         match writer
-            .try_write(&record.encode_to_vec())
+            .try_write_with(
+                record.encoded_len(),
+                |destination| record.encode(destination).map_err(std::io::Error::other),
+                || {},
+            )
             .map_err(io::Error::other)?
         {
             WriteOutcome::Full => return Ok(inherited),
