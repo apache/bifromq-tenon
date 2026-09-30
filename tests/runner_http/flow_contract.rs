@@ -49,13 +49,13 @@ fn invalid_document_requests_preserve_the_document_and_live_resources() -> io::R
     let runtime_root = directory.path().join("pipelines");
     let before = runtime_snapshot(&runtime_root)?;
     let semantic: serde_json::Value = serde_json::from_str(include_str!(
-        "../../contracts/tenon-document/v1.semantic-test-vectors.json"
+        "../../contracts/tenon-document/test-fixtures/v1.semantic-test-vectors.json"
     ))?;
     let schema: serde_json::Value = serde_json::from_str(include_str!(
-        "../../contracts/tenon-document/v1.test-vectors.json"
+        "../../contracts/tenon-document/test-fixtures/v1.test-vectors.json"
     ))?;
     let verification: serde_json::Value = serde_json::from_str(include_str!(
-        "../../contracts/tenon-document/v1.verification-test-vectors.json"
+        "../../contracts/tenon-document/test-fixtures/v1.verification-test-vectors.json"
     ))?;
     let cases = semantic["invalid"]
         .as_array()

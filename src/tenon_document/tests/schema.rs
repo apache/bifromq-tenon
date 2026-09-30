@@ -25,7 +25,7 @@ use serde_json::Value;
 use std::io;
 
 const TEST_VECTORS: &[u8] =
-    include_bytes!("../../../contracts/tenon-document/v1.test-vectors.json");
+    include_bytes!("../../../contracts/tenon-document/test-fixtures/v1.test-vectors.json");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

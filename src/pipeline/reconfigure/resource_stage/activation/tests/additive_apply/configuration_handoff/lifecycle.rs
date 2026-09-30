@@ -24,7 +24,7 @@ use crate::pipeline::reconfigure::ReconfigureShutdown;
 async fn early_target_source_failure_aborts_and_reaps_the_entire_transition() -> TestResult {
     let vectors: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/contracts/plugin/process_protocol_test_vectors.json"
+        "/contracts/plugin/test-fixtures/process_protocol_test_vectors.json"
     )))?;
     let cases = vectors["sourceFailureDuringConfiguration"]
         .as_array()
@@ -209,7 +209,7 @@ async fn stop_and_core_failure_during_old_completion_wait_reap_current_and_early
 fn early_replacement_case() -> TestResult<ConfigurationCase> {
     let vectors: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/contracts/plugin/process_protocol_test_vectors.json"
+        "/contracts/plugin/test-fixtures/process_protocol_test_vectors.json"
     )))?;
     Ok(serde_json::from_value(
         vectors["configurationOnlyReplacement"][0].clone(),

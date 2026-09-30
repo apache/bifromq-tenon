@@ -29,15 +29,16 @@ use tenon::runner_test_support::contracts::core::{
     pipeline_diagnostics_to_runner, pipeline_to_runner, runner_to_pipeline,
 };
 
-const TEST_VECTORS: &[u8] = include_bytes!("../contracts/core/pipeline_control_test_vectors.json");
+const TEST_VECTORS: &[u8] =
+    include_bytes!("../contracts/core/test-fixtures/pipeline_control_test_vectors.json");
 const DIAGNOSTICS_TEST_VECTORS: &[u8] =
-    include_bytes!("../contracts/core/pipeline_diagnostics_test_vectors.json");
+    include_bytes!("../contracts/core/test-fixtures/pipeline_diagnostics_test_vectors.json");
 const PIPELINE_FIELD_REGISTRY: &[u8] =
-    include_bytes!("../contracts/core/pipeline_control_field_registry.json");
+    include_bytes!("../contracts/core/test-fixtures/pipeline_control_field_registry.json");
 const PIPELINE_CONTROL_DESCRIPTOR: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/pipeline_control_descriptor.pb"));
 const PROCESS_FIELD_REGISTRY: &[u8] =
-    include_bytes!("../contracts/plugin/process_control_field_registry.json");
+    include_bytes!("../contracts/plugin/test-fixtures/process_control_field_registry.json");
 const PROCESS_CONTROL_DESCRIPTOR: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/process_control_descriptor.pb"));
 
@@ -621,7 +622,7 @@ fn metrics_stream_round_trips_the_shared_byte_vectors() -> io::Result<()> {
         PipelineMetricsToRunner, RunnerToPipelineMetrics, pipeline_metrics_to_runner,
     };
     let vectors: serde_json::Value = serde_json::from_slice(include_bytes!(
-        "../contracts/core/pipeline_metrics_test_vectors.json"
+        "../contracts/core/test-fixtures/pipeline_metrics_test_vectors.json"
     ))?;
     assert_eq!(vectors["formatVersion"], 1);
     let valid: Vec<serde_json::Value> = serde_json::from_value(vectors["valid"].clone())?;

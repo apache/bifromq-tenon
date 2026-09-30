@@ -841,7 +841,7 @@ pub(super) fn sink_queue(working: &Path, channel: &FlowChannel) -> std::path::Pa
 /// Shared cases are consumed by real process and UDS tests, not a second state machine.
 pub(super) fn lifecycle_vectors() -> Result<serde_json::Value, Error> {
     Ok(serde_json::from_str(include_str!(
-        "../../contracts/process_protocol_test_vectors.json"
+        "../../contracts/test-fixtures/process_protocol_test_vectors.json"
     ))?)
 }
 

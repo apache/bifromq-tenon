@@ -209,16 +209,16 @@ under the License.
                         <argLine>--enable-native-access=ALL-UNNAMED</argLine>
                         <systemPropertyVariables>
                             <tenon.contracts.ipc.directory>
-                                ${maven.multiModuleProjectDirectory}/../../contracts/ipc
+                                ${maven.multiModuleProjectDirectory}/../../contracts/ipc/test-fixtures
                             </tenon.contracts.ipc.directory>
                             <tenon.contracts.source.directory>
-                                ${maven.multiModuleProjectDirectory}/../../contracts/source
+                                ${maven.multiModuleProjectDirectory}/../../contracts/source/test-fixtures
                             </tenon.contracts.source.directory>
                             <tenon.contracts.sink.directory>
-                                ${maven.multiModuleProjectDirectory}/../../contracts/sink
+                                ${maven.multiModuleProjectDirectory}/../../contracts/sink/test-fixtures
                             </tenon.contracts.sink.directory>
                             <tenon.contracts.plugin.directory>
-                                ${maven.multiModuleProjectDirectory}/../../contracts/plugin
+                                ${maven.multiModuleProjectDirectory}/../../contracts/plugin/test-fixtures
                             </tenon.contracts.plugin.directory>
                         </systemPropertyVariables>
                     </configuration>

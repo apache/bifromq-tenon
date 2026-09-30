@@ -103,7 +103,7 @@ async fn configuration_vectors_keep_consumers_alive_until_old_source_responsibil
 -> TestResult {
     let vectors: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/contracts/plugin/process_protocol_test_vectors.json"
+        "/contracts/plugin/test-fixtures/process_protocol_test_vectors.json"
     )))?;
     let mut cases: Vec<ConfigurationCase> =
         serde_json::from_value(vectors["configurationOnlyReplacement"].clone())?;

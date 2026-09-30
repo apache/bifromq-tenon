@@ -271,7 +271,7 @@ impl Drop for Fixture {
 #[test]
 fn flow_paths_and_payload_decoding_match_shared_vectors() -> Result<(), Error> {
     let vectors: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../contracts/process_protocol_test_vectors.json"
+        "../../../../contracts/test-fixtures/process_protocol_test_vectors.json"
     ))?;
     for vector in vectors["startup"]["valid"]
         .as_array()
@@ -289,7 +289,7 @@ fn flow_paths_and_payload_decoding_match_shared_vectors() -> Result<(), Error> {
         assert_eq!(serde_json::to_value(paths)?, vector["relativeQueuePaths"]);
     }
     let vectors: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../contracts/payload_decode_test_vectors.json"
+        "../../../../contracts/test-fixtures/payload_decode_test_vectors.json"
     ))?;
     #[derive(Clone, PartialEq, Message)]
     struct Payload {

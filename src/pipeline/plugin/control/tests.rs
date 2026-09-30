@@ -367,7 +367,7 @@ async fn shared_invalid_lifecycle_vectors_are_rejected_by_the_real_control_sessi
 -> Result<(), Box<dyn Error>> {
     let vectors: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/contracts/plugin/process_protocol_test_vectors.json"
+        "/contracts/plugin/test-fixtures/process_protocol_test_vectors.json"
     )))?;
     for vector in vectors["lifecycleInvalid"]
         .as_array()

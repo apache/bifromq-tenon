@@ -50,7 +50,7 @@ under the License.
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <systemPropertyVariables>
-                        <tenon.contracts.ipc.directory>${project.basedir}/../../../contracts/ipc</tenon.contracts.ipc.directory>
+                        <tenon.contracts.ipc.directory>${project.basedir}/../../../contracts/ipc/test-fixtures</tenon.contracts.ipc.directory>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>

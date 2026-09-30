@@ -185,7 +185,7 @@ async fn publication_vectors_accept_starting_and_failed_instances_without_pollin
     }
     let vectors: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/contracts/plugin/process_protocol_test_vectors.json"
+        "/contracts/plugin/test-fixtures/process_protocol_test_vectors.json"
     )))?;
     let cases: Vec<Vector> = serde_json::from_value(vectors["initialActivation"].clone())?;
     assert_eq!(cases.len(), 3);

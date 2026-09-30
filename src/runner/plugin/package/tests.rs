@@ -36,9 +36,9 @@ use std::process::Command;
 use tar::{Builder, Header};
 
 const MANIFEST_VECTORS: &[u8] =
-    include_bytes!("../../../../contracts/plugin/manifest.test-vectors.json");
+    include_bytes!("../../../../contracts/plugin/test-fixtures/manifest.test-vectors.json");
 const PAYLOAD_VECTORS: &[u8] =
-    include_bytes!("../../../../contracts/plugin/payload_contract_test_vectors.json");
+    include_bytes!("../../../../contracts/plugin/test-fixtures/payload_contract_test_vectors.json");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

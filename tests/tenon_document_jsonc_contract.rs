@@ -26,7 +26,7 @@ use std::io;
 use tenon::runner_test_support::tenon_document::UnverifiedTenonDocument;
 
 const TEST_VECTORS: &[u8] =
-    include_bytes!("../contracts/tenon-document/jsonc_parser_test_vectors.json");
+    include_bytes!("../contracts/tenon-document/test-fixtures/jsonc_parser_test_vectors.json");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -29,19 +29,19 @@ SCHEMA_CASES = (
     (
         "Tenon Document v1 Schema",
         CONTRACTS / "tenon-document" / "v1.schema.json",
-        CONTRACTS / "tenon-document" / "v1.test-vectors.json",
+        CONTRACTS / "tenon-document" / "test-fixtures" / "v1.test-vectors.json",
         "document",
     ),
     (
         "Runner configuration Schema",
         CONTRACTS / "runner" / "config.schema.json",
-        CONTRACTS / "runner" / "config.schema-test-vectors.json",
+        CONTRACTS / "runner" / "test-fixtures" / "config.schema-test-vectors.json",
         "config",
     ),
     (
         "Plugin manifest Schema",
         CONTRACTS / "plugin" / "manifest.schema.json",
-        CONTRACTS / "plugin" / "manifest.test-vectors.json",
+        CONTRACTS / "plugin" / "test-fixtures" / "manifest.test-vectors.json",
         "manifest",
     ),
 )

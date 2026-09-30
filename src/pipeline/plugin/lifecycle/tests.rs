@@ -253,7 +253,7 @@ fn startup_bytes_and_queue_paths_match_the_shared_contract() -> Result<(), Box<d
     use std::path::{Path, PathBuf};
     let vectors: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/contracts/plugin/process_protocol_test_vectors.json"
+        "/contracts/plugin/test-fixtures/process_protocol_test_vectors.json"
     )))?;
     for vector in vectors["startup"]["valid"]
         .as_array()

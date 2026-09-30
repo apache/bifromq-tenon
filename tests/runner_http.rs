@@ -1184,7 +1184,7 @@ fn openapi_document_is_served_and_covers_every_public_operation() -> io::Result<
 #[test]
 fn invalid_document_versions_fail_startup_without_rewriting_the_store() -> io::Result<()> {
     let vectors: serde_json::Value = serde_json::from_str(include_str!(
-        "../contracts/tenon-document/v1.test-vectors.json"
+        "../contracts/tenon-document/test-fixtures/v1.test-vectors.json"
     ))?;
     let cases = vectors["invalid"]
         .as_array()

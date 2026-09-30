@@ -46,7 +46,7 @@ use tempfile::TempDir;
 #[test]
 fn shared_vectors_resolve_and_reconstruct_real_installed_programs() -> io::Result<()> {
     let vectors: RuntimeVectors = serde_json::from_slice(include_bytes!(
-        "../../../../contracts/tenon-document/v1.runtime-resolution-test-vectors.json"
+        "../../../../contracts/tenon-document/test-fixtures/v1.runtime-resolution-test-vectors.json"
     ))?;
     assert_eq!(vectors.format_version, 1);
     assert_eq!(vectors.cases.len(), 8);

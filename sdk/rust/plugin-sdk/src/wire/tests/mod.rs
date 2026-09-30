@@ -24,7 +24,7 @@ use serde_json::Value;
 #[test]
 fn lifecycle_wire_matches_shared_vectors() -> Result<(), Box<dyn std::error::Error>> {
     let vectors: Value = serde_json::from_str(include_str!(
-        "../../../contracts/process_control_test_vectors.json"
+        "../../../contracts/test-fixtures/process_control_test_vectors.json"
     ))?;
     for item in vectors["valid"].as_array().ok_or("missing valid vectors")? {
         let bytes: Vec<u8> = serde_json::from_value(item["encoded"].clone())?;
@@ -72,7 +72,7 @@ fn source_record_preserves_unsigned_identity_and_payload() -> Result<(), Box<dyn
 fn sink_record_decoding_matches_shared_vectors_including_empty_payload()
 -> Result<(), Box<dyn std::error::Error>> {
     let vectors: Value = serde_json::from_str(include_str!(
-        "../../../contracts/egress_record_test_vectors.json"
+        "../../../contracts/test-fixtures/egress_record_test_vectors.json"
     ))?;
     for vector in vectors["valid"].as_array().ok_or("missing Sink vectors")? {
         let encoded: Vec<u8> = serde_json::from_value(vector["encoded"].clone())?;
@@ -95,7 +95,7 @@ fn sink_record_decoding_matches_shared_vectors_including_empty_payload()
 #[test]
 fn source_and_completion_bytes_match_shared_vectors() -> Result<(), Box<dyn std::error::Error>> {
     let vectors: Value = serde_json::from_str(include_str!(
-        "../../../contracts/ingress_record_test_vectors.json"
+        "../../../contracts/test-fixtures/ingress_record_test_vectors.json"
     ))?;
     for vector in vectors["valid"]
         .as_array()
@@ -148,7 +148,7 @@ fn source_and_completion_bytes_match_shared_vectors() -> Result<(), Box<dyn std:
 fn generated_lifecycle_descriptor_matches_the_field_registry()
 -> Result<(), Box<dyn std::error::Error>> {
     let registry: Value = serde_json::from_str(include_str!(
-        "../../../contracts/process_control_field_registry.json"
+        "../../../contracts/test-fixtures/process_control_field_registry.json"
     ))?;
     let descriptor = prost_types::FileDescriptorSet::decode(
         include_bytes!(concat!(env!("OUT_DIR"), "/process_control_descriptor.pb")).as_slice(),

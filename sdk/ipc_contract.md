@@ -195,7 +195,7 @@ python3 tools/verify-ipc-fuzz.py
 
 The first two commands test the language IPC modules. `tools/verify-rust.sh` also runs cross-language and Runner/SDK integration checks. See the [fuzzing guide](../fuzz/README.md) for its required toolchain. Rust fault-injection exports require `repository-test-support`; Java test fixtures use an internal test JAR. Keep both out of ordinary SDK distributions.
 
-Consume the shared [Queue vectors](../contracts/ipc/queue_v1_test_vectors.json) and [Bell vectors](../contracts/ipc/bell_v1_test_vectors.json) directly. Packaging may materialize these files in an archive; do not maintain another editable copy.
+Consume the shared [Queue vectors](../contracts/ipc/test-fixtures/queue_v1_test_vectors.json) and [Bell vectors](../contracts/ipc/test-fixtures/bell_v1_test_vectors.json) directly. Packaging may materialize these files in an archive; do not maintain another editable copy.
 
 | Required proof | Executable evidence |
 | --- | --- |

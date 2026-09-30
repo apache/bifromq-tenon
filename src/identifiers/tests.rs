@@ -29,7 +29,7 @@ use serde_json::Value;
 use std::io;
 
 const TEST_VECTORS: &[u8] =
-    include_bytes!("../../contracts/core/domain-identifiers.test-vectors.json");
+    include_bytes!("../../contracts/core/test-fixtures/domain-identifiers.test-vectors.json");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

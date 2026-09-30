@@ -54,7 +54,7 @@ fn first_cpu_sample_is_missing_and_filters_do_not_sample_cpu() -> Result<(), cra
 #[test]
 fn shared_metrics_wire_vectors() -> Result<(), crate::Error> {
     let vectors: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../contracts/process_metrics_test_vectors.json"
+        "../../../contracts/test-fixtures/process_metrics_test_vectors.json"
     ))?;
     for kind in ["valid", "malformed"] {
         for vector in vectors[kind].as_array().ok_or("vectors missing")? {

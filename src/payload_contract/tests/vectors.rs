@@ -31,9 +31,9 @@ use prost_types::{FileDescriptorSet, field_descriptor_proto};
 use serde::Deserialize;
 
 const TEST_VECTORS: &[u8] =
-    include_bytes!("../../../contracts/sink/payload_contract_test_vectors.json");
+    include_bytes!("../../../contracts/sink/test-fixtures/payload_contract_test_vectors.json");
 const SOURCE_TEST_VECTORS: &[u8] =
-    include_bytes!("../../../contracts/source/payload_contract_test_vectors.json");
+    include_bytes!("../../../contracts/source/test-fixtures/payload_contract_test_vectors.json");
 static NEXT_TEMPORARY_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]

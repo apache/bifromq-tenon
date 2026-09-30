@@ -24,7 +24,8 @@ use prost::Message;
 use serde::Deserialize;
 use tenon::runner_test_support::contracts::sink::EgressRecord;
 
-const TEST_VECTORS: &[u8] = include_bytes!("../contracts/sink/egress_record_test_vectors.json");
+const TEST_VECTORS: &[u8] =
+    include_bytes!("../contracts/sink/test-fixtures/egress_record_test_vectors.json");
 
 #[derive(Debug, Deserialize)]
 struct EgressRecordTestVectors {

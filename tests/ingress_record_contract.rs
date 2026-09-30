@@ -26,7 +26,7 @@ use tenon::runner_test_support::contracts::source::{
 };
 use tenon::runner_test_support::ingress_queue::COMPLETION_MAX_PAYLOAD_SIZE;
 
-const TEST_VECTORS: &[u8] = include_bytes!("../contracts/source/ingress_record_test_vectors.json");
+const TEST_VECTORS: &[u8] = include_bytes!("../contracts/source/test-fixtures/ingress_record_test_vectors.json");
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

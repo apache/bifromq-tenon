@@ -32,8 +32,9 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 #[test]
 fn manifest_vectors_have_the_published_results() -> TestResult {
-    let vectors: Value =
-        serde_json::from_str(include_str!("../contracts/manifest.test-vectors.json"))?;
+    let vectors: Value = serde_json::from_str(include_str!(
+        "../contracts/test-fixtures/manifest.test-vectors.json"
+    ))?;
     let directory = package("source")?;
     for group in ["valid", "invalid"] {
         let cases = vectors[group]
@@ -76,15 +77,15 @@ fn manifest_vectors_have_the_published_results() -> TestResult {
 fn payload_vectors_have_the_published_roots_and_errors() -> TestResult {
     for (text, interface) in [
         (
-            include_str!("../contracts/plugin-payload.test-vectors.json"),
+            include_str!("../contracts/test-fixtures/plugin-payload.test-vectors.json"),
             None,
         ),
         (
-            include_str!("../contracts/source-payload.test-vectors.json"),
+            include_str!("../contracts/test-fixtures/source-payload.test-vectors.json"),
             Some("source"),
         ),
         (
-            include_str!("../contracts/sink-payload.test-vectors.json"),
+            include_str!("../contracts/test-fixtures/sink-payload.test-vectors.json"),
             Some("sink"),
         ),
     ] {
@@ -146,7 +147,7 @@ fn payload_vectors_have_the_published_roots_and_errors() -> TestResult {
 #[test]
 fn identifier_vectors_use_the_manifest_contract() -> TestResult {
     let vectors: Value = serde_json::from_str(include_str!(
-        "../contracts/domain-identifiers.test-vectors.json"
+        "../contracts/test-fixtures/domain-identifiers.test-vectors.json"
     ))?;
     let directory = package("source")?;
     for group in ["valid", "invalid"] {

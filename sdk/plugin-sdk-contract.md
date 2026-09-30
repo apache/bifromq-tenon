@@ -35,18 +35,18 @@ Every SDK must implement the same language-neutral facts: startup material; Plug
 
 Each fact has one machine-readable source. SDKs must consume shared protocol definitions, field registries, schemas, and test vectors. They must not maintain independently editable copies.
 
-Use the shared [Queue vectors](../contracts/ipc/queue_v1_test_vectors.json) and [Bell vectors](../contracts/ipc/bell_v1_test_vectors.json). Follow the IPC binding and wait ordering, including condition rechecks and notification after publication. Verify native wait/wake behavior across processes as well as matching file bytes and error codes.
+Use the shared [Queue vectors](../contracts/ipc/test-fixtures/queue_v1_test_vectors.json) and [Bell vectors](../contracts/ipc/test-fixtures/bell_v1_test_vectors.json). Follow the IPC binding and wait ordering, including condition rechecks and notification after publication. Verify native wait/wake behavior across processes as well as matching file bytes and error codes.
 
 The machine-readable sources are:
 
 | Contract | Shared files |
 | --- | --- |
-| Program manifest and payload declarations | [manifest Schema](../contracts/plugin/manifest.schema.json), [manifest vectors](../contracts/plugin/manifest.test-vectors.json), [payload contract vectors](../contracts/plugin/payload_contract_test_vectors.json) |
-| Launch arguments and stdin | [process protocol vectors](../contracts/plugin/process_protocol_test_vectors.json) |
-| Process metrics | [metrics Protobuf](../contracts/plugin/process_metrics.proto), [metrics vectors](../contracts/plugin/process_metrics_test_vectors.json), [metric catalog](../contracts/metrics/catalog.json) |
-| Lifecycle messages, field ownership, and phase validation | [control Protobuf](../contracts/plugin/process_control.proto), [field registry](../contracts/plugin/process_control_field_registry.json), [control vectors](../contracts/plugin/process_control_test_vectors.json) |
-| Source record and Completion encoding | [Ingress Protobuf](../contracts/source/ingress_record.proto), [record vectors](../contracts/source/ingress_record_test_vectors.json), [Source payload vectors](../contracts/source/payload_contract_test_vectors.json) |
-| Sink record and payload decoding | [Egress Protobuf](../contracts/sink/egress_record.proto), [record vectors](../contracts/sink/egress_record_test_vectors.json), [payload vectors](../contracts/sink/payload_contract_test_vectors.json), [decode vectors](../contracts/sink/payload_decode_test_vectors.json) |
+| Program manifest and payload declarations | [manifest Schema](../contracts/plugin/manifest.schema.json), [manifest vectors](../contracts/plugin/test-fixtures/manifest.test-vectors.json), [payload contract vectors](../contracts/plugin/test-fixtures/payload_contract_test_vectors.json) |
+| Launch arguments and stdin | [process protocol vectors](../contracts/plugin/test-fixtures/process_protocol_test_vectors.json) |
+| Process metrics | [metrics Protobuf](../contracts/plugin/process_metrics.proto), [metrics vectors](../contracts/plugin/test-fixtures/process_metrics_test_vectors.json), [metric catalog](../contracts/metrics/catalog.json) |
+| Lifecycle messages, field ownership, and phase validation | [control Protobuf](../contracts/plugin/process_control.proto), [field registry](../contracts/plugin/test-fixtures/process_control_field_registry.json), [control vectors](../contracts/plugin/test-fixtures/process_control_test_vectors.json) |
+| Source record and Completion encoding | [Ingress Protobuf](../contracts/source/ingress_record.proto), [record vectors](../contracts/source/test-fixtures/ingress_record_test_vectors.json), [Source payload vectors](../contracts/source/test-fixtures/payload_contract_test_vectors.json) |
+| Sink record and payload decoding | [Egress Protobuf](../contracts/sink/egress_record.proto), [record vectors](../contracts/sink/test-fixtures/egress_record_test_vectors.json), [payload vectors](../contracts/sink/test-fixtures/payload_contract_test_vectors.json), [decode vectors](../contracts/sink/test-fixtures/payload_decode_test_vectors.json) |
 
 Factory discovery, exception versus `Result`, `Future` versus `CompletionStage`, lifecycle naming, ownership syntax, and SDK-internal threads or runtimes may differ by language. They must not change success boundaries, submission order, backpressure timing, completion results, shutdown order, failure visibility, or retry responsibility.
 
@@ -248,7 +248,7 @@ This section owns SDK runtime collection semantics. The author interfaces and st
 
 The [Plugin metrics protocol](../contracts/plugin/process_metrics.proto) runs as an independent bidirectional gRPC stream on the existing `controlSocket`, through a separate client channel. The SDK first sends `Attach` with the exact 16-byte `launchId`. Pipeline accepts at most one metrics stream per registered live launch. Lifecycle control, stdin lifetime, and business Queues never carry metrics. Metrics attachment cannot delay Ready.
 
-After Attach the SDK waits for `Collect` (`PipelineToPluginMetrics`). Empty `include` selects both built-in metrics; otherwise only exact catalog names are selected. Each request produces one `Snapshot`, containing standard OpenTelemetry `MetricsData` protobuf bytes. An empty snapshot is valid. Do not send unsolicited samples, request identifiers, chunks, heartbeats, or a final flush. The whole gRPC message is limited to 65,536 bytes. Shared byte vectors are in [process_metrics_test_vectors.json](../contracts/plugin/process_metrics_test_vectors.json).
+After Attach the SDK waits for `Collect` (`PipelineToPluginMetrics`). Empty `include` selects both built-in metrics; otherwise only exact catalog names are selected. Each request produces one `Snapshot`, containing standard OpenTelemetry `MetricsData` protobuf bytes. An empty snapshot is valid. Do not send unsolicited samples, request identifiers, chunks, heartbeats, or a final flush. The whole gRPC message is limited to 65,536 bytes. Shared byte vectors are in [process_metrics_test_vectors.json](../contracts/plugin/test-fixtures/process_metrics_test_vectors.json).
 
 Each process owns one private provider, on-demand cumulative reader, and sampler from its language implementation of [process-metrics](process-metrics-contract.md). That module owns CPU/RSS semantics, OS calls and sampling errors; the SDK owns filtering, diagnostics, OpenTelemetry conversion and transport. Source, Sink, and combined Programs use the same sampler implementation. Filtering out CPU must not invoke its sampler or advance its baseline. Reconnecting metrics retains the sampler; process restart creates a new one.
 

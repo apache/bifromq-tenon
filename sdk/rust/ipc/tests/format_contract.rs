@@ -36,7 +36,7 @@ use tenon_ipc::queue::{
     plan_append, record_frame_len,
 };
 
-const TEST_VECTORS: &[u8] = include_bytes!("../contracts/queue_v1_test_vectors.json");
+const TEST_VECTORS: &[u8] = include_bytes!("../contracts/test-fixtures/queue_v1_test_vectors.json");
 
 /// Doorbell slot indices this test's model publishes.
 ///
@@ -247,8 +247,9 @@ fn shared_header_vectors_fix_exact_bytes_and_errors() -> io::Result<()> {
 
 #[test]
 fn shared_bell_region_vectors_fix_exact_bytes_and_errors() -> io::Result<()> {
-    let region: BellRegionVectors =
-        serde_json::from_slice(include_bytes!("../contracts/bell_v1_test_vectors.json"))?;
+    let region: BellRegionVectors = serde_json::from_slice(include_bytes!(
+        "../contracts/test-fixtures/bell_v1_test_vectors.json"
+    ))?;
     assert_eq!(region.format_version, 1);
     assert_eq!(region.armed_value, DOORBELL_ARMED);
     assert_eq!(region.notified_value, DOORBELL_NOTIFIED);

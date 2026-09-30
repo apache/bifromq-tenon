@@ -31,7 +31,7 @@ use tenon::runner_test_support::tenon_document::{
 
 const TEST_MEMORY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const TEST_VECTORS: &[u8] =
-    include_bytes!("../contracts/tenon-document/v1.verification-test-vectors.json");
+    include_bytes!("../contracts/tenon-document/test-fixtures/v1.verification-test-vectors.json");
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

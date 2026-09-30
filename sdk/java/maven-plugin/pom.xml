@@ -80,7 +80,7 @@ under the License.
     <build>
         <testResources>
             <testResource>
-                <directory>${maven.multiModuleProjectDirectory}/../../contracts/plugin</directory>
+                <directory>${maven.multiModuleProjectDirectory}/../../contracts/plugin/test-fixtures</directory>
                 <targetPath>contracts/plugin</targetPath>
                 <includes>
                     <include>manifest.test-vectors.json</include>

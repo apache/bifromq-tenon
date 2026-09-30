@@ -213,7 +213,7 @@ fn flat_flow_fields_preserve_authored_delivery_and_script() -> io::Result<()> {
 #[test]
 fn rejects_invalid_schema_vectors_at_the_original_locations() -> io::Result<()> {
     let vectors: SharedVectors = serde_json::from_slice(include_bytes!(
-        "../../../contracts/tenon-document/v1.test-vectors.json"
+        "../../../contracts/tenon-document/test-fixtures/v1.test-vectors.json"
     ))?;
     let verifier = verifier()?;
     assert!(!vectors.invalid.is_empty());
@@ -270,10 +270,14 @@ fn schema_issues_are_sorted_escaped_and_redacted() -> io::Result<()> {
 fn rejects_semantic_and_lua_vectors_without_inventing_dependent_errors() -> io::Result<()> {
     let verifier = verifier()?;
     for bytes in [
-        include_bytes!("../../../contracts/tenon-document/v1.semantic-test-vectors.json")
-            .as_slice(),
-        include_bytes!("../../../contracts/tenon-document/v1.verification-test-vectors.json")
-            .as_slice(),
+        include_bytes!(
+            "../../../contracts/tenon-document/test-fixtures/v1.semantic-test-vectors.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/tenon-document/test-fixtures/v1.verification-test-vectors.json"
+        )
+        .as_slice(),
     ] {
         let vectors: SharedVectors = serde_json::from_slice(bytes)?;
         assert!(!vectors.invalid.is_empty());
@@ -427,7 +431,7 @@ fn accepts_flow_parallelism_without_rewriting_authored_values() -> io::Result<()
 fn derives_channels_independently_of_document_cpu_from_ratio_vectors() -> io::Result<()> {
     let verifier = verifier()?;
     let vectors: Value = serde_json::from_str(include_str!(
-        "../../../contracts/tenon-document/v1.parallelism-test-vectors.json"
+        "../../../contracts/tenon-document/test-fixtures/v1.parallelism-test-vectors.json"
     ))?;
     let cases = vectors["cases"]
         .as_array()
@@ -752,7 +756,7 @@ fn domain_projection_moves_config_and_lua_and_redacts_debug() -> io::Result<()> 
 #[test]
 fn target_identifier_vectors_preserve_domain_types_and_exact_text() -> io::Result<()> {
     let vectors: SharedVectors = serde_json::from_slice(include_bytes!(
-        "../../../contracts/core/domain-identifiers.test-vectors.json"
+        "../../../contracts/core/test-fixtures/domain-identifiers.test-vectors.json"
     ))?;
     let parse = |vector: &Value| -> Result<String, crate::identifiers::IdentifierParseError> {
         let text = vector["value"].as_str().unwrap_or_default().to_owned();

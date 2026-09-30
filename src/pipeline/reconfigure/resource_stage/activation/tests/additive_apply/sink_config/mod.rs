@@ -79,7 +79,7 @@ async fn replacement_vector_replays_unreleased_output_before_source_completion()
     }
     let vectors: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/contracts/plugin/process_protocol_test_vectors.json"
+        "/contracts/plugin/test-fixtures/process_protocol_test_vectors.json"
     )))?;
     let case: Vector = serde_json::from_value(vectors["sinkConfigurationReplacement"].clone())?;
     let script = format!(

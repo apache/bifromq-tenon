@@ -33,7 +33,7 @@ def version(command: list[str]) -> str:
 
 
 def seed_corpus() -> None:
-    vectors = json.loads((ROOT / "contracts/ipc/queue_v1_test_vectors.json").read_text(encoding="utf-8"))
+    vectors = json.loads((ROOT / "contracts/ipc/test-fixtures/queue_v1_test_vectors.json").read_text(encoding="utf-8"))
     corpus = ROOT / "fuzz/corpus/queue_format"
     corpus.mkdir(parents=True, exist_ok=True)
     for kind in ("headers", "frames"):

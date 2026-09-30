@@ -29,8 +29,9 @@ use std::time::Duration;
 use std::{env, fs, io, process};
 
 const SCHEMA_VECTORS: &[u8] =
-    include_bytes!("../../contracts/runner/config.schema-test-vectors.json");
-const CONFIG_VECTORS: &[u8] = include_bytes!("../../contracts/runner/config.test-vectors.json");
+    include_bytes!("../../contracts/runner/test-fixtures/config.schema-test-vectors.json");
+const CONFIG_VECTORS: &[u8] =
+    include_bytes!("../../contracts/runner/test-fixtures/config.test-vectors.json");
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
