@@ -747,15 +747,35 @@ fn emit_uses_canonical_field_and_map_key_order() -> io::Result<()> {
         r#"
         local function fill(builder, reverse)
             if reverse then
+                builder:setExplicitZero(0)
+                builder:setIntegerChoice(7)
                 builder:putCounts("z", 9)
                 builder:putCounts("a", 1)
                 builder:putChildrenById("10"):setName("ten")
                 builder:putChildrenById("2"):setName("two")
+                local repeated = builder:addChildrenBuilder()
+                repeated:setValue("x")
+                repeated:setName("c")
+                local child = builder:getChildBuilder()
+                child:setValue(string.char(0, 255))
+                child:setName("k")
+                builder:setLabel("r")
+                builder:setEnabled(true)
             else
+                builder:setEnabled(true)
+                builder:setLabel("r")
+                local child = builder:getChildBuilder()
+                child:setName("k")
+                child:setValue(string.char(0, 255))
+                local repeated = builder:addChildrenBuilder()
+                repeated:setName("c")
+                repeated:setValue("x")
                 builder:putChildrenById("2"):setName("two")
                 builder:putChildrenById("10"):setName("ten")
                 builder:putCounts("a", 1)
                 builder:putCounts("z", 9)
+                builder:setIntegerChoice(7)
+                builder:setExplicitZero(0)
             end
         end
 
@@ -781,9 +801,11 @@ fn emit_uses_canonical_field_and_map_key_order() -> io::Result<()> {
     let (_, first) = payload_boundary(first)?;
     let (_, second) = payload_boundary(second)?;
     let expected = [
-        0x72, 0x05, 0x0a, 0x01, b'a', 0x10, 0x01, 0x72, 0x05, 0x0a, 0x01, b'z', 0x10, 0x09, 0x7a,
-        0x09, 0x08, 0x02, 0x12, 0x05, 0x0a, 0x03, b't', b'w', b'o', 0x7a, 0x09, 0x08, 0x0a, 0x12,
-        0x05, 0x0a, 0x03, b't', b'e', b'n',
+        0x08, 0x01, 0x42, 0x01, b'r', 0x5a, 0x07, 0x0a, 0x01, b'k', 0x12, 0x02, 0x00, 0xff, 0x6a,
+        0x06, 0x0a, 0x01, b'c', 0x12, 0x01, b'x', 0x72, 0x05, 0x0a, 0x01, b'a', 0x10, 0x01, 0x72,
+        0x05, 0x0a, 0x01, b'z', 0x10, 0x09, 0x7a, 0x09, 0x08, 0x02, 0x12, 0x05, 0x0a, 0x03, b't',
+        b'w', b'o', 0x7a, 0x09, 0x08, 0x0a, 0x12, 0x05, 0x0a, 0x03, b't', b'e', b'n', 0x88, 0x01,
+        0x07, 0x98, 0x01, 0x00,
     ];
     assert_eq!(first, expected);
     assert_eq!(second, expected);

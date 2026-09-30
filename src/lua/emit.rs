@@ -192,13 +192,10 @@ fn encode_deterministically(
 }
 
 fn encode_message(message: &DynamicMessage, output: &mut Vec<u8>) -> LuaApiResult<()> {
-    let mut fields = Vec::new();
-    fields
-        .try_reserve_exact(message.fields().count())
-        .map_err(|_| LuaApiFailure::ResourceLimitExceeded)?;
-    fields.extend(message.fields());
-    fields.sort_unstable_by_key(|(field, _)| field.number());
-    for (field, value) in fields {
+    // prost-reflect 0.16.5 iterates its BTreeMap in field-number order. This is
+    // not a public API guarantee; preserve emit_uses_canonical_field_and_map_key_order
+    // when upgrading the dependency. Map entries still require their own sort.
+    for (field, value) in message.fields() {
         encode_field(&field, value, output)?;
     }
     Ok(())
