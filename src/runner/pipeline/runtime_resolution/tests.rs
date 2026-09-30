@@ -411,17 +411,18 @@ fn unified_program_roots_decode_source_and_build_sink_with_the_shared_vm() -> io
         .map_err(io::Error::other)?
         .into_parts();
     result.map_err(|error| io::Error::other(error.to_string()))?;
-    assert_eq!(
-        boundaries,
-        [EmitBoundary::Payload {
-            sink_contract_id,
-            payload: input.encode_to_vec(),
-        }]
-    );
-    let [EmitBoundary::Payload { payload, .. }] = boundaries.as_slice() else {
+    let [
+        EmitBoundary::Payload {
+            sink_contract_id: output_contract,
+            record,
+        },
+    ] = boundaries.as_slice()
+    else {
         return Err(io::Error::other("Expected exactly one Sink payload"));
     };
-    let output = DynamicMessage::decode(sink, payload.as_slice()).map_err(io::Error::other)?;
+    assert_eq!(output_contract, &sink_contract_id);
+    assert_eq!(record.payload(), input.encode_to_vec());
+    let output = DynamicMessage::decode(sink, record.payload()).map_err(io::Error::other)?;
     assert_eq!(
         output.get_field_by_name("value").as_deref(),
         Some(&ProtobufValue::String(String::from("input value")))

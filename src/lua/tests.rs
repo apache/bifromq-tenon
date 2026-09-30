@@ -281,12 +281,12 @@ fn built_payload(vm: &LuaVm, global_name: &str) -> io::Result<AnyUserData> {
 fn payload_boundary(boundary: &EmitBoundary) -> io::Result<(&SinkContractId, &[u8])> {
     let EmitBoundary::Payload {
         sink_contract_id,
-        payload,
+        record,
     } = boundary
     else {
         return Err(io::Error::other("Expected a payload emit boundary"));
     };
-    Ok((sink_contract_id, payload))
+    Ok((sink_contract_id, record.payload()))
 }
 
 fn protobuf_field(
@@ -575,6 +575,54 @@ fn main_can_create_and_build_a_payload() -> io::Result<()> {
 }
 
 #[test]
+fn emit_frames_empty_payload_and_varint_length_boundaries() -> io::Result<()> {
+    use crate::contracts::sink::EgressRecord;
+
+    let descriptor = lua_builder_contract()?;
+    let mut vm = load_vm_with_contracts(
+        r#"
+        local builder = registry:getBuilder("com.example.lua-builder@1.0.0")
+        function main(event)
+            for _, size in ipairs({0, 125, 126, 16380, 16381}) do
+                builder:setBody(string.rep("x", size))
+                emit(builder:build())
+            end
+        end
+        "#,
+        limits()?,
+        lua_builder_contracts()?,
+    )
+    .map_err(test_error)?;
+    let outcome = vm.call_timer(1);
+    outcome.result().map_err(test_error_ref)?;
+    let cases: &[(usize, usize, &[u8])] = &[
+        (0, 0, &[0x0a, 0x00]),
+        (125, 127, &[0x0a, 0x7f]),
+        (126, 128, &[0x0a, 0x80, 0x01]),
+        (16380, 16383, &[0x0a, 0xff, 0x7f]),
+        (16381, 16384, &[0x0a, 0x80, 0x80, 0x01]),
+    ];
+    assert_eq!(outcome.emit_boundaries().len(), cases.len());
+    for (boundary, &(body_len, payload_len, header)) in outcome.emit_boundaries().iter().zip(cases)
+    {
+        let EmitBoundary::Payload { record, .. } = boundary else {
+            return Err(io::Error::other("Expected a framed payload"));
+        };
+        assert!(record.as_bytes().starts_with(header));
+        assert_eq!(record.len(), header.len() + payload_len);
+        let decoded = EgressRecord::decode(record.as_bytes()).map_err(io::Error::other)?;
+        assert_eq!(decoded.payload, record.payload());
+        let payload = DynamicMessage::decode(descriptor.clone(), decoded.payload.as_slice())
+            .map_err(io::Error::other)?;
+        assert_eq!(
+            protobuf_field(&payload, "body")?,
+            ProtobufValue::Bytes(vec![b'x'; body_len].into())
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn emit_checks_complete_record_size_and_preserves_accepted_boundaries() -> io::Result<()> {
     let registry = HashMap::from([(
         SinkContractId::try_from("com.example.lua-builder@1.0.0").map_err(io::Error::other)?,
@@ -719,19 +767,17 @@ fn payload_and_completion_only_emits_preserve_one_ordered_prefix() -> io::Result
     );
     let [
         EmitBoundary::CompletionOnly,
-        EmitBoundary::Payload { payload: first, .. },
+        EmitBoundary::Payload { record: first, .. },
         EmitBoundary::CompletionOnly,
-        EmitBoundary::Payload {
-            payload: second, ..
-        },
+        EmitBoundary::Payload { record: second, .. },
     ] = outcome.emit_boundaries()
     else {
         return Err(io::Error::other(
             "main should preserve four ordered emit boundaries",
         ));
     };
-    for (payload, expected_label) in [(first, "first"), (second, "second")] {
-        let decoded = DynamicMessage::decode(root_descriptor.clone(), payload.as_slice())
+    for (record, expected_label) in [(first, "first"), (second, "second")] {
+        let decoded = DynamicMessage::decode(root_descriptor.clone(), record.payload())
             .map_err(io::Error::other)?;
         assert_eq!(
             protobuf_field(&decoded, "label")?,

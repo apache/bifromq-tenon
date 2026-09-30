@@ -335,7 +335,7 @@ async fn a_full_not_ready_sink_blocks_only_its_dependent_flow_until_release() ->
         )?;
         let frame = tenon_ipc::queue::record_frame_len(capacity,
             std::num::NonZeroU64::new(capacity.get() - tenon_ipc::queue::FRAME_HEADER_LEN as u64).ok_or("Queue limit is missing")?,
-            crate::contracts::sink::EncodedEgressRecord::from(&EgressRecord { payload: Vec::new() }).len())?;
+            crate::contracts::sink::encoded_len(0))?;
         let count = usize::try_from(capacity.get())? / frame;
         assert_eq!(count * frame, usize::try_from(capacity.get())?);
         let target = additive_apply::next_revision(root, |document| {

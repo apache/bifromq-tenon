@@ -423,6 +423,12 @@ enum LuaApiFailure {
     Vm(MluaError),
 }
 
+impl From<std::collections::TryReserveError> for LuaApiFailure {
+    fn from(_: std::collections::TryReserveError) -> Self {
+        Self::ResourceLimitExceeded
+    }
+}
+
 impl From<MluaError> for LuaApiFailure {
     fn from(error: MluaError) -> Self {
         Self::Vm(error)

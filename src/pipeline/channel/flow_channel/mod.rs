@@ -807,7 +807,7 @@ impl FlowChannel {
     ) -> Result<FlowChannelStep, FlowChannelError> {
         let EmitBoundary::Payload {
             sink_contract_id,
-            payload,
+            record,
         } = boundary
         else {
             if self.complete_all(record_ids, IngressCompletionStatus::Ok)?
@@ -822,7 +822,7 @@ impl FlowChannel {
             .get_mut(&sink_contract_id)
             .expect("Lua emits only registered Sink Contracts from this Channel definition");
         let sent = route
-            .send(payload, &self.metrics, || self.control.is_stopping())
+            .send(record, &self.metrics, || self.control.is_stopping())
             .map_err(|source| FlowChannelError::EgressRoute {
                 sink_contract_id: sink_contract_id.clone(),
                 source,

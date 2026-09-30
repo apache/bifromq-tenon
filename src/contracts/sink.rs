@@ -20,16 +20,31 @@
 //! Sink wire contracts and Egress framing shared by Lua and Queue delivery.
 //!
 //! Lua checks the complete encoded size before allocating or accepting output.
-//! Pipeline delivery uses the same size calculation and always writes field 1,
+//! Lua encodes the complete record once; delivery moves it to all target Queues.
+//! Encoding always writes field 1,
 //! including an empty payload, because an empty Queue body is a wrap marker.
 
-include!(concat!(env!("OUT_DIR"), "/tenon.sink.rs"));
-
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct EncodedEgressRecord {
     bytes: Vec<u8>,
 }
 
 impl EncodedEgressRecord {
+    /// Writes framing and payload into one fallibly reserved buffer.
+    /// The encoder must append exactly `payload_len` bytes or return its error.
+    pub(crate) fn try_encode<E: From<std::collections::TryReserveError>>(
+        payload_len: usize,
+        encode_payload: impl FnOnce(&mut Vec<u8>) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(encoded_len(payload_len))?;
+        // Emit even an empty payload: a zero-length Queue record is a wrap marker.
+        prost::encoding::encode_key(1, prost::encoding::WireType::LengthDelimited, &mut bytes);
+        prost::encoding::encode_varint(payload_len as u64, &mut bytes);
+        encode_payload(&mut bytes)?;
+        Ok(Self { bytes })
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.bytes.len()
     }
@@ -37,14 +52,16 @@ impl EncodedEgressRecord {
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
-}
 
-impl From<&EgressRecord> for EncodedEgressRecord {
-    fn from(record: &EgressRecord) -> Self {
-        let mut bytes = Vec::with_capacity(encoded_len(record.payload.len()));
-        // Emit even an empty payload: a zero-length Queue record is reserved for wrap markers.
-        prost::encoding::bytes::encode(1, &record.payload, &mut bytes);
-        Self { bytes }
+    #[expect(
+        clippy::expect_used,
+        reason = "try_encode writes the framing before invoking the payload encoder"
+    )]
+    pub(crate) fn payload(&self) -> &[u8] {
+        let mut payload = &self.bytes[prost::encoding::key_len(1)..];
+        prost::encoding::decode_varint(&mut payload)
+            .expect("Encoded Egress record has a length prefix");
+        payload
     }
 }
 
@@ -54,21 +71,35 @@ pub(crate) fn encoded_len(payload_len: usize) -> usize {
         + payload_len
 }
 
+// Production writes the record directly; contract tests use the generated decoder.
+#[cfg(any(test, feature = "repository-test-support"))]
+include!(concat!(env!("OUT_DIR"), "/tenon.sink.rs"));
+
 #[cfg(test)]
 mod tests {
     use super::{EgressRecord, EncodedEgressRecord, encoded_len};
+    use prost::Message as _;
+    use std::collections::TryReserveError;
 
     #[test]
-    fn length_matches_encoding_across_varint_boundaries() {
+    fn length_matches_encoding_across_varint_boundaries() -> Result<(), Box<dyn std::error::Error>>
+    {
         for payload_len in [0, 1, 127, 128, 16383, 16384] {
             let record = EgressRecord {
                 payload: vec![0; payload_len],
             };
-            let encoded = EncodedEgressRecord::from(&record);
+            let encoded =
+                EncodedEgressRecord::try_encode::<TryReserveError>(payload_len, |bytes| {
+                    bytes.extend_from_slice(&record.payload);
+                    Ok(())
+                })?;
             assert_eq!(encoded.len(), encoded_len(payload_len));
+            assert_eq!(encoded.payload(), record.payload);
+            assert_eq!(EgressRecord::decode(encoded.as_bytes())?, record);
             if payload_len == 0 {
                 assert_eq!(encoded.as_bytes(), [0x0a, 0x00]);
             }
         }
+        Ok(())
     }
 }
