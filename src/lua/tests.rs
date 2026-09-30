@@ -4266,6 +4266,103 @@ fn source_payload_projects_every_supported_protobuf_shape() -> io::Result<()> {
 }
 
 #[test]
+fn source_uint64_values_remain_exact_in_scalars_lists_and_map_keys() -> io::Result<()> {
+    let descriptor = compile_payload_contract_fixture(
+        "tenon-lua-uint64-test",
+        "contracts/source/test-fixtures/lua-uint64",
+        "source_record_payload.proto",
+    )?;
+    let contract = PluginProgramPayloadContract::parse(descriptor, PluginInterface::Source)
+        .map_err(io::Error::other)?
+        .source_root_message()
+        .ok_or_else(|| io::Error::other("Source fixture root is missing"))?;
+    let mut vm = LuaVm::load(
+        r#"
+        local expected = {
+            "0", "9", "10", "99", "100", "9223372036854775807",
+            "9223372036854775808", "18446744073709551615", "18446744073709551615"
+        }
+        local saved
+        calls = 0
+        function main(event)
+            calls = calls + 1
+            local payload = event.payload
+            local current = expected[(calls - 1) % #expected + 1]
+            assert(payload.unsigned64 == current)
+            assert(payload.fixed64 == current)
+            for _, field in ipairs({"unsignedValues", "fixedValues"}) do
+                assert(#payload[field] == #expected)
+                for index, value in ipairs(expected) do
+                    assert(payload[field][index] == value)
+                end
+            end
+            for _, value in ipairs(expected) do
+                assert(payload.byId[value] == value)
+            end
+            saved = saved or payload
+            assert(saved.unsigned64 == "0")
+            assert(saved.fixed64 == "0")
+        end
+        "#,
+        limits()?,
+        NonZeroU64::new(262_144)
+            .ok_or_else(|| io::Error::other("test record limit must be non-zero"))?,
+        contract.clone(),
+        HashMap::new(),
+        None,
+        || false,
+    )
+    .map_err(test_error)?;
+    let values = [
+        0,
+        9,
+        10,
+        99,
+        100,
+        i64::MAX as u64,
+        1_u64 << 63,
+        u64::MAX,
+        u64::MAX,
+    ];
+    let mut message = DynamicMessage::new(contract);
+    for field in ["unsigned_values", "fixed_values"] {
+        set_protobuf_field(
+            &mut message,
+            field,
+            ProtobufValue::List(values.iter().copied().map(ProtobufValue::U64).collect()),
+        )?;
+    }
+    set_protobuf_field(
+        &mut message,
+        "by_id",
+        ProtobufValue::Map(
+            values
+                .iter()
+                .map(|&value| (MapKey::U64(value), ProtobufValue::U64(value)))
+                .collect(),
+        ),
+    )?;
+    for _ in 0..2 {
+        for value in values {
+            for field in ["unsigned_64", "fixed_64"] {
+                set_protobuf_field(&mut message, field, ProtobufValue::U64(value))?;
+            }
+            call_source(&mut vm, 73, message.encode_to_vec())?
+                .into_result_without_emit_boundaries()
+                .map_err(test_error)?;
+        }
+        vm.lua.gc_collect().map_err(mlua_test_error)?;
+    }
+    assert_eq!(
+        vm.environment_values
+            .raw_get::<i64>("calls")
+            .map_err(mlua_test_error)?,
+        18
+    );
+    Ok(())
+}
+
+#[test]
 fn source_payload_preserves_proto3_default_and_presence_semantics() -> io::Result<()> {
     let mut vm = load_vm(
         r#"

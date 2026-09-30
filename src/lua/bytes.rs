@@ -25,7 +25,8 @@
 
 use super::{
     ExecutionBudget, LuaApiFailure, LuaApiResult, LuaVmFatalFault,
-    create_catchable_api_wrapper_factory, finish_api_call, publish_readonly_namespace,
+    create_catchable_api_wrapper_factory, create_unsigned_decimal, finish_api_call,
+    publish_readonly_namespace,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -44,7 +45,6 @@ const HEX_ERROR: &str = "bytes hex input must be even-length ASCII hexadecimal";
 const BASE64_ERROR: &str = "bytes base64 input must be canonical padded RFC 4648";
 const CRC_PARAMETER_ERROR: &str = "bytes CRC16 parameters must be integers from 0 to 65535";
 const CRC_BIT_ORDER_ERROR: &str = "bytes CRC16 bit order must be \"msb\" or \"lsb\"";
-const DECIMAL_DIGITS: &[u8; 10] = b"0123456789";
 const LOWER_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 type BytesFunction = fn(&Lua, MultiValue) -> BytesResult<Value>;
@@ -197,12 +197,16 @@ fn read_i32_le(_lua: &Lua, arguments: MultiValue) -> BytesResult<Value> {
 
 fn read_u64_be(lua: &Lua, arguments: MultiValue) -> BytesResult<Value> {
     let value = read_array::<8>(&arguments)?;
-    unsigned_decimal(lua, u64::from_be_bytes(value))
+    create_unsigned_decimal(lua, u64::from_be_bytes(value))
+        .map(Value::String)
+        .map_err(LuaApiFailure::Vm)
 }
 
 fn read_u64_le(lua: &Lua, arguments: MultiValue) -> BytesResult<Value> {
     let value = read_array::<8>(&arguments)?;
-    unsigned_decimal(lua, u64::from_le_bytes(value))
+    create_unsigned_decimal(lua, u64::from_le_bytes(value))
+        .map(Value::String)
+        .map_err(LuaApiFailure::Vm)
 }
 
 fn read_i64_be(_lua: &Lua, arguments: MultiValue) -> BytesResult<Value> {
@@ -233,29 +237,6 @@ fn read_f64_be(_lua: &Lua, arguments: MultiValue) -> BytesResult<Value> {
 fn read_f64_le(_lua: &Lua, arguments: MultiValue) -> BytesResult<Value> {
     let value = read_array::<8>(&arguments)?;
     finite_number(f64::from_le_bytes(value))
-}
-
-fn unsigned_decimal(lua: &Lua, mut value: u64) -> BytesResult<Value> {
-    let mut output = [0_u8; 20];
-    let mut start = output.len();
-    loop {
-        start = start
-            .checked_sub(1)
-            .ok_or(LuaApiFailure::ResourceLimitExceeded)?;
-        let digit_index =
-            usize::try_from(value % 10).map_err(|_| LuaApiFailure::ResourceLimitExceeded)?;
-        output[start] = DECIMAL_DIGITS
-            .get(digit_index)
-            .copied()
-            .ok_or(LuaApiFailure::ResourceLimitExceeded)?;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
-    }
-    lua.create_string(&output[start..])
-        .map(Value::String)
-        .map_err(LuaApiFailure::Vm)
 }
 
 fn finite_number(value: f64) -> BytesResult<Value> {

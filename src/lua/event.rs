@@ -19,7 +19,10 @@
 
 //! Owned Kernel input and its deeply read-only Lua projection.
 
-use super::{LuaVmFatalFault, fatal_error, install_readonly_backing, record_fatal_fault};
+use super::{
+    LuaVmFatalFault, create_unsigned_decimal, fatal_error, install_readonly_backing,
+    record_fatal_fault,
+};
 use bytes::Bytes;
 use mlua::{Lua, Table, Value as LuaValue};
 use prost_reflect::{
@@ -260,7 +263,7 @@ fn project_source_map_key(lua: &Lua, key: &MapKey) -> mlua::Result<LuaValue> {
         MapKey::I32(value) => Ok(LuaValue::Integer(i64::from(*value))),
         MapKey::I64(value) => Ok(LuaValue::Integer(*value)),
         MapKey::U32(value) => Ok(LuaValue::Integer(i64::from(*value))),
-        MapKey::U64(value) => lua.create_string(value.to_string()).map(LuaValue::String),
+        MapKey::U64(value) => create_unsigned_decimal(lua, *value).map(LuaValue::String),
         MapKey::String(value) => lua.create_string(value).map(LuaValue::String),
     }
 }
@@ -283,7 +286,7 @@ fn project_source_scalar(
             Ok(LuaValue::Integer(i64::from(*value)))
         }
         (ProtobufValue::U64(value), Kind::Uint64 | Kind::Fixed64) => {
-            lua.create_string(value.to_string()).map(LuaValue::String)
+            create_unsigned_decimal(lua, *value).map(LuaValue::String)
         }
         (ProtobufValue::F32(value), Kind::Float) => Ok(LuaValue::Number(f64::from(*value))),
         (ProtobufValue::F64(value), Kind::Double) => Ok(LuaValue::Number(*value)),
