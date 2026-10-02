@@ -303,7 +303,7 @@ fn from_hex(lua: &Lua, arguments: MultiValue) -> BytesResult<Value> {
     output
         .try_reserve_exact(bytes.len() / 2)
         .map_err(|_| LuaApiFailure::ResourceLimitExceeded)?;
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let high = decode_hex_nibble(pair[0]).ok_or_else(|| LuaApiFailure::Api(HEX_ERROR))?;
         let low = decode_hex_nibble(pair[1]).ok_or_else(|| LuaApiFailure::Api(HEX_ERROR))?;
         output.push((high << 4) | low);

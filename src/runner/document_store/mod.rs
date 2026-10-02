@@ -84,7 +84,7 @@ impl TenonDocumentEtag {
         let mut digest = [0_u8; SHA256_BYTES];
         for (output, pair) in digest
             .iter_mut()
-            .zip(bytes[1..=SHA256_HEX_BYTES].chunks_exact(2))
+            .zip(bytes[1..=SHA256_HEX_BYTES].as_chunks::<2>().0)
         {
             *output = decode_lower_hex(pair[0])? << 4 | decode_lower_hex(pair[1])?;
         }
@@ -597,7 +597,7 @@ fn decode_committed_file_name(file_name: &OsStr) -> Option<[u8; SHA256_BYTES]> {
     }
 
     let mut decoded = [0_u8; SHA256_BYTES];
-    for (target, pair) in decoded.iter_mut().zip(digest.chunks_exact(2)) {
+    for (target, pair) in decoded.iter_mut().zip(digest.as_chunks::<2>().0) {
         *target = decode_lower_hex(pair[0])? << 4 | decode_lower_hex(pair[1])?;
     }
     Some(decoded)

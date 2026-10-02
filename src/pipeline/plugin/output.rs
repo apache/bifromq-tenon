@@ -152,10 +152,7 @@ impl LineFraming {
         }
         let (mut text, invalid_utf8) = match String::from_utf8(mem::take(&mut self.bytes)) {
             Ok(text) => (text, false),
-            Err(error) => {
-                let bytes = error.into_bytes();
-                (String::from_utf8_lossy(&bytes).into_owned(), true)
-            }
+            Err(error) => (error.into_utf8_lossy(), true),
         };
         if text.len() > DIAGNOSTIC_TEXT_MAXIMUM_BYTES {
             let mut boundary = DIAGNOSTIC_TEXT_MAXIMUM_BYTES;

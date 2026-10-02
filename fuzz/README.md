@@ -26,7 +26,7 @@ Use `queue_format` to fuzz Queue headers and frames, and `queue_runtime` to fuzz
 Install the pinned tools, then run verification:
 
 ```sh
-rustup toolchain install nightly-2026-08-11
+rustup toolchain install nightly-2026-10-02
 cargo install cargo-fuzz --version 0.13.2 --locked
 python3 tools/verify-ipc-fuzz.py
 ```
@@ -36,7 +36,7 @@ If an existing `nightly` alias points to exactly the same compiler, you can set 
 The script generates initial inputs from the single shared set of queue test vectors, then runs coverage-guided fuzzing for 60 and 90 seconds, respectively, with the default AddressSanitizer, debug assertions, and overflow checks enabled. `fuzz/corpus/` retains automatically discovered inputs, `fuzz/artifacts/` retains failure inputs, and `target/ipc-fuzz/` contains the full logs. These are local verification artifacts, not release materials. Each rerun overwrites the logs; archive both the logs and the corpus used when preserving results. A fixed random seed does not guarantee the same exploration sequence in a time-limited run; exact replay requires the specific input. Replay a failure using the same target name and failure file, for example:
 
 ```sh
-cargo +nightly-2026-08-11 fuzz run queue_runtime fuzz/artifacts/queue_runtime/crash-<hash> --dev
+cargo +nightly-2026-10-02 fuzz run queue_runtime fuzz/artifacts/queue_runtime/crash-<hash> --dev
 ```
 
 Format inputs are limited to 4096 bytes. Runtime inputs use at most 128 actions and capacities from 16 to 2056 bytes. Run the [repository checks](../CONTRIBUTING.md#verification) for larger records and cross-process behavior.

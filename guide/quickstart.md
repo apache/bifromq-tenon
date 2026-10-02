@@ -31,7 +31,7 @@ From the Tenon source root:
 tools/example/local.sh
 ```
 
-The script builds the Runner, generates and bundles the scaffold plugin, bundles the two built-in plugins, starts Tenon, installs all three Programs, saves two Documents, and checks both Pipelines. It installs `cargo-generate` 0.24.0 if the Cargo subcommand is missing. This provides the `cargo generate` command; installing the Rust toolchain alone does not install it. The script adds Cargo's binary directory to `PATH` so Cargo can find the generator.
+The script builds the Runner, generates and bundles the scaffold plugin, bundles the two built-in plugins, starts Tenon, installs all three Programs, saves two Documents, and checks both Pipelines. It installs `cargo-generate` 0.25.0 if the Cargo subcommand is missing or has a different version. This provides the `cargo generate` command; installing the Rust toolchain alone does not install it. The script adds Cargo's binary directory to `PATH` so Cargo can find the generator.
 
 It writes the generated project, the three bundles, `runner.jsonc`, and two input Documents in a temporary directory. `runner.jsonc` tells Tenon where to keep local state and to listen on `127.0.0.1`. `hello.jsonc` defines one Instance of the generated source-and-sink Program and one Flow that binds it as both Source and Sink; Lua copies the Source message into its Sink payload. `builtins.jsonc` defines a second Pipeline with one Flow from Dummy Source to Stdout Sink; Lua's timer emits a message every second. Both Flows omit `parallelism`, so each uses one channel. The script polls `/pipelines/hello` and `/pipelines/builtins`; the JSON files it saves from those GET responses are status snapshots, not the Documents submitted to Tenon. It checks `output.txt` for the scaffold Pipeline and subscribes to the built-in Pipeline's diagnostic stream to confirm stdout output.
 
@@ -49,7 +49,7 @@ To run each stage yourself, first build the Runner and install the two Cargo too
 
 ```sh
 cargo build --locked --bin tenon
-cargo install cargo-generate --version 0.24.0 --locked
+cargo install cargo-generate --version 0.25.0 --locked
 cargo install --path sdk/rust/cargo-tenon --locked
 ```
 

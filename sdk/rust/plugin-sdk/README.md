@@ -27,12 +27,12 @@ The SDK owns the Tenon control connection, bounded queues, send results, and shu
 
 ## Start a project
 
-You need Rust 1.97.1, Cargo, and a native compiler/linker. Generated projects use edition 2024 and supply `protoc` through a build dependency.
+You need Rust 1.99.0, Cargo, and a native compiler/linker. Generated projects use edition 2024 and supply `protoc` through a build dependency.
 
 Install the generator from crates.io, then generate a project from the Git template:
 
 ```bash
-cargo install cargo-generate --version 0.24.0 --locked
+cargo install cargo-generate --version 0.25.0 --locked
 cargo generate --git https://github.com/apache/incubator-bifromq-tenon.git \
   sdk/rust/rust-plugin-scaffold \
   --name example-source --define interface=source \

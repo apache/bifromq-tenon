@@ -25,7 +25,7 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLCHAIN = os.environ.get("TENON_FUZZ_TOOLCHAIN", "nightly-2026-08-11")
+TOOLCHAIN = os.environ.get("TENON_FUZZ_TOOLCHAIN", "nightly-2026-10-02")
 
 
 def version(command: list[str]) -> str:
@@ -55,7 +55,7 @@ def seed_corpus() -> None:
 
 def main() -> None:
     compiler = version(["rustc", f"+{TOOLCHAIN}", "--version"])
-    if compiler != "rustc 1.99.0-nightly (12c36e253 2026-08-10)":
+    if compiler != "rustc 1.101.0-nightly (c36f14571 2026-10-01)":
         raise RuntimeError(f"Unexpected fuzz compiler: {compiler}")
     fuzzer = version(["cargo", f"+{TOOLCHAIN}", "fuzz", "--version"])
     if fuzzer != "cargo-fuzz 0.13.2":

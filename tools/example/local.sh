@@ -39,9 +39,11 @@ fi
 cargo_bin="$(command -v cargo)"
 export PATH="$(dirname -- "$cargo_bin"):$PATH"
 
-if ! cargo generate --version >/dev/null 2>&1; then
-  printf 'Installing the scaffold-required cargo-generate 0.24.0...\n'
-  cargo install cargo-generate --version 0.24.0 --locked
+generator_version="$(sed -n 's/^cargo_generate_version = "=\([^"]*\)"/\1/p' "$tenon_root/sdk/rust/rust-plugin-scaffold/cargo-generate.toml")"
+installed_generator_version="$(cargo generate --version 2>/dev/null | awk '{print $NF}' || true)"
+if [[ "$installed_generator_version" != "$generator_version" ]]; then
+  printf 'Installing the scaffold-required cargo-generate %s...\n' "$generator_version"
+  cargo install cargo-generate --version "$generator_version" --locked
 fi
 
 port="${TENON_PORT:-18080}"

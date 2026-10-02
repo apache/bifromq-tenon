@@ -25,7 +25,7 @@ Build, validate and package Rust plugins for Tenon. `cargo-tenon` compiles your 
 
 ## Installation
 
-You need Rust 1.97.1, Cargo, and a native compiler/linker. The Rust packages use edition 2024. Install the tool from a Tenon source checkout:
+You need Rust 1.99.0, Cargo, and a native compiler/linker. The Rust packages use edition 2024. Install the tool from a Tenon source checkout:
 
 ```bash
 cargo install --path sdk/rust/cargo-tenon --locked
@@ -91,7 +91,7 @@ For example, a Source package has:
 name = "file-source"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.97.1"
+rust-version = "1.99.0"
 
 [package.metadata.tenon]
 display-name = "File Source"

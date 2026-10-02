@@ -1125,23 +1125,9 @@ fn install_readonly_backing(lua: &Lua, backing: Table) -> mlua::Result<Table> {
     Ok(proxy)
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "u64 has at most 20 decimal digits and a decimal remainder is below ten"
-)]
-fn create_unsigned_decimal(lua: &Lua, mut value: u64) -> mlua::Result<LuaString> {
-    let mut output = [0_u8; 20];
-    let mut start = output.len();
-    loop {
-        start = start.checked_sub(1).expect("u64 uses at most 20 digits");
-        let digit_index = usize::try_from(value % 10).expect("a decimal digit fits usize");
-        output[start] = b"0123456789"[digit_index];
-        value /= 10;
-        if value == 0 {
-            break;
-        }
-    }
-    lua.create_string(&output[start..])
+fn create_unsigned_decimal(lua: &Lua, value: u64) -> mlua::Result<LuaString> {
+    let mut output = fmt::NumBuffer::new();
+    lua.create_string(value.format_into(&mut output))
 }
 
 fn proxy_backing(table: &Table) -> mlua::Result<Option<Table>> {

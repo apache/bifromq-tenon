@@ -16,7 +16,7 @@
 # under the License.
 
 [template]
-cargo_generate_version = "=0.24.0"
+cargo_generate_version = "=0.25.0"
 
 [placeholders.interface]
 type = "string"

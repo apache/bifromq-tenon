@@ -27,15 +27,15 @@ The template includes working example code, payload definitions, a configuration
 
 ## Prerequisites
 
-- Rust 1.97.1 with Cargo and a native compiler/linker. Generated projects use edition 2024.
-- `cargo-generate` 0.24.0, the version required by this template.
+- Rust 1.99.0 with Cargo and a native compiler/linker. Generated projects use edition 2024.
+- `cargo-generate` 0.25.0, the version required by this template.
 - `cargo-tenon` 0.1.0 for contract checking and installation bundles.
 - Registry access for dependencies, or a populated Cargo cache. A system `protoc` installation is not needed; the generated build dependencies supply it.
 
 Install the generator and build tool from crates.io:
 
 ```bash
-cargo install cargo-generate --version 0.24.0 --locked
+cargo install cargo-generate --version 0.25.0 --locked
 cargo install cargo-tenon --version 0.1.0 --locked
 ```
 
