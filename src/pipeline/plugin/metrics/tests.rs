@@ -160,6 +160,49 @@ fn snapshots_require_the_launch_identity_fixed_gauges_and_requested_names() {
     data.resource_metrics[0].scope_metrics[0].metrics[0].unit = "KB".into();
     assert!(validate(&data, &launch, &[]).is_none());
     assert!(validate(&MetricsData::default(), &launch, &[]).is_some());
+    let mut multiple = sample(&launch);
+    multiple
+        .resource_metrics
+        .push(multiple.resource_metrics[0].clone());
+    assert!(validate(&multiple, &launch, &[]).is_none());
+}
+
+#[tokio::test]
+async fn empty_and_repeated_snapshots_preserve_the_session_and_registered_labels() -> TestResult {
+    let server = ServerOwner::start()?;
+    let launch = [5; 16];
+    let labels = vec![
+        attribute("tenon.node.id", "node"),
+        attribute("tenon.plugin.instance.id", "plugin"),
+    ];
+    let _registration = server.registry.register(&launch, labels.clone());
+    // A registered process may not have attached its metrics connection yet.
+    assert!(
+        server
+            .registry
+            .collect(&[], budget())
+            .await
+            .resource_metrics
+            .is_empty()
+    );
+    let mut peer = server.peer(&launch).await?;
+    for reply in [MetricsData::default(), sample(&launch), sample(&launch)] {
+        let mut expected = reply.clone();
+        if let Some(resource) = expected.resource_metrics.first_mut() {
+            resource
+                .resource
+                .as_mut()
+                .ok_or("resource missing")?
+                .attributes
+                .extend(labels.clone());
+        }
+        let registry = server.registry.clone();
+        let pending = tokio::spawn(async move { registry.collect(&[], budget()).await });
+        assert!(peer.requests.message().await?.is_some());
+        peer.reply(reply).await?;
+        assert_eq!(pending.await?, expected);
+    }
+    Ok(())
 }
 
 #[tokio::test]

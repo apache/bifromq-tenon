@@ -113,11 +113,8 @@ impl PluginProcessMetrics {
             Ok(entries) => entries
                 .iter()
                 .filter_map(|(launch, entry)| {
-                    Some((
-                        launch.clone(),
-                        entry.attributes.clone(),
-                        entry.connection.upgrade()?,
-                    ))
+                    let connection = entry.connection.upgrade()?;
+                    Some((launch.clone(), entry.attributes.clone(), connection))
                 })
                 .collect::<Vec<_>>(),
             Err(_) => return output,
@@ -175,12 +172,9 @@ async fn collect_one(
     if session.lifetime.has_changed().is_err() {
         return None;
     }
-    for resource in &mut snapshot.resource_metrics {
-        resource
-            .resource
-            .as_mut()?
-            .attributes
-            .extend(attributes.clone());
+    // Validation permits at most one resource, which takes ownership of the labels.
+    if let Some(resource) = snapshot.resource_metrics.first_mut() {
+        resource.resource.as_mut()?.attributes.extend(attributes);
     }
     *connection.session.lock().ok()? = Some(session);
     connection.wake.wake();
