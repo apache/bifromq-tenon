@@ -18,6 +18,7 @@
  */
 
 use super::*;
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value;
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point};
 use std::io;
@@ -98,10 +99,33 @@ async fn time_and_shutdown_never_collect_without_a_request() -> io::Result<()> {
         .build();
     tokio::time::advance(Duration::from_secs(3600)).await;
     assert_eq!(calls.load(Ordering::Relaxed), 0);
-    runtime.collect(&[]);
+    let counter = runtime
+        .meter()
+        .u64_counter("tenon.pipeline.restarts")
+        .build();
+    counter.add(2, &[]);
+    assert!(
+        runtime
+            .collect(&["tenon.flow.input.records".to_owned()])
+            .resource_metrics
+            .is_empty()
+    );
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+    counter.add(3, &[]);
+    let snapshot = runtime.collect(&["tenon.pipeline.restarts".to_owned()]);
+    let Some(metric::Data::Sum(sum)) =
+        &snapshot.resource_metrics[0].scope_metrics[0].metrics[0].data
+    else {
+        return Err(io::Error::other("missing cumulative restart counter"));
+    };
+    assert_eq!(sum.aggregation_temporality, 2);
+    assert_eq!(
+        sum.data_points[0].value,
+        Some(number_data_point::Value::AsInt(5))
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     runtime.shutdown();
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     Ok(())
 }
 
@@ -148,5 +172,98 @@ fn cardinality_overflow_is_visible_in_cumulative_snapshots() -> io::Result<()> {
         .ok_or_else(|| io::Error::other("overflow was not exported"))?;
     assert_eq!(overflow.value, Some(number_data_point::Value::AsInt(10)));
     runtime.shutdown();
+    Ok(())
+}
+
+#[test]
+fn filtering_before_conversion_preserves_the_official_snapshot() -> io::Result<()> {
+    use opentelemetry::InstrumentationScope;
+    use prost::Message as _;
+
+    let reader = SharedReader(Arc::new(ManualReader::builder().build()));
+    let provider = SdkMeterProvider::builder()
+        .with_reader(reader.clone())
+        .with_resource(
+            Resource::builder_empty()
+                .with_schema_url(
+                    [KeyValue::new("service.name", "tenon.pipeline")],
+                    "https://example.test/resource",
+                )
+                .build(),
+        )
+        .build();
+    let meter = provider.meter_with_scope(
+        InstrumentationScope::builder("measured")
+            .with_version("1.0")
+            .with_schema_url("https://example.test/scope")
+            .with_attributes([KeyValue::new("scope.attribute", "value")])
+            .build(),
+    );
+    let attributes = [KeyValue::new("tenon.channel.index", 7_i64)];
+    meter
+        .u64_counter("records")
+        .with_unit("{record}")
+        .with_description("Recorded inputs")
+        .build()
+        .add(9_007_199_254_740_993, &attributes);
+    meter.i64_gauge("waiting").build().record(-1, &attributes);
+    let histogram = meter
+        .f64_histogram("duration")
+        .with_boundaries(Vec::new())
+        .build();
+    histogram.record(0.25, &attributes);
+    histogram.record(0.75, &attributes);
+    meter
+        .u64_observable_gauge("missing")
+        .with_callback(|_| {})
+        .build();
+    provider
+        .meter("other")
+        .u64_gauge("memory")
+        .build()
+        .record(64, &[]);
+    provider
+        .meter("empty")
+        .u64_observable_gauge("no_points")
+        .with_callback(|_| {})
+        .build();
+
+    let mut data = ResourceMetrics::default();
+    reader.collect(&mut data).map_err(io::Error::other)?;
+    for names in [
+        vec![],
+        vec!["records"],
+        vec!["duration", "waiting"],
+        vec!["memory"],
+        vec!["records", "records", "unknown"],
+        vec!["missing", "no_points"],
+        vec!["unknown"],
+    ] {
+        let include: Vec<String> = names.into_iter().map(str::to_owned).collect();
+        let mut expected = MetricsData {
+            resource_metrics: ExportMetricsServiceRequest::from(&data).resource_metrics,
+        };
+        for resource in &mut expected.resource_metrics {
+            for scope in &mut resource.scope_metrics {
+                scope.metrics.retain(|metric| {
+                    (include.is_empty() || include.contains(&metric.name)) && has_points(metric)
+                });
+            }
+            resource
+                .scope_metrics
+                .retain(|scope| !scope.metrics.is_empty());
+        }
+        expected
+            .resource_metrics
+            .retain(|resource| !resource.scope_metrics.is_empty());
+        let actual = filtered_snapshot(&data, &include);
+        assert_eq!(actual, expected, "include={include:?}");
+        assert_eq!(
+            actual.encode_to_vec(),
+            expected.encode_to_vec(),
+            "include={include:?}"
+        );
+    }
+    provider.shutdown().map_err(io::Error::other)?;
     Ok(())
 }

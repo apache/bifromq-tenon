@@ -22,8 +22,7 @@
 use base64::Engine as _;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Meter, MeterProvider as _};
-use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-use opentelemetry_proto::tonic::metrics::v1::MetricsData;
+use opentelemetry_proto::tonic::metrics::v1::{self as otlp, MetricsData};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
@@ -125,23 +124,7 @@ impl MetricsRuntime {
         self.reader
             .collect(&mut metrics)
             .expect("active metrics reader remains registered and unpoisoned");
-        let mut snapshot = MetricsData {
-            resource_metrics: ExportMetricsServiceRequest::from(&metrics).resource_metrics,
-        };
-        for resource in &mut snapshot.resource_metrics {
-            for scope in &mut resource.scope_metrics {
-                scope.metrics.retain(|metric| {
-                    (include.is_empty() || include.contains(&metric.name)) && has_points(metric)
-                });
-            }
-            resource
-                .scope_metrics
-                .retain(|scope| !scope.metrics.is_empty());
-        }
-        snapshot
-            .resource_metrics
-            .retain(|resource| !resource.scope_metrics.is_empty());
-        snapshot
+        filtered_snapshot(&metrics, include)
     }
 
     #[allow(
@@ -152,6 +135,46 @@ impl MetricsRuntime {
         self.provider
             .shutdown_with_timeout(Duration::ZERO)
             .expect("active ManualReader closes without concurrent collection");
+    }
+}
+
+// Borrow the SDK snapshot and only allocate OTLP data for requested metrics.
+// Collection remains unconditional so callbacks keep their sampling history.
+fn filtered_snapshot(metrics: &ResourceMetrics, include: &[String]) -> MetricsData {
+    let scope_metrics: Vec<_> = metrics
+        .scope_metrics()
+        .filter_map(|scope| {
+            let selected: Vec<_> = scope
+                .metrics()
+                .filter(|metric| {
+                    include.is_empty() || include.iter().any(|name| name == metric.name())
+                })
+                .map(otlp::Metric::from)
+                .filter(has_points)
+                .collect();
+            if selected.is_empty() {
+                return None;
+            }
+            Some(otlp::ScopeMetrics {
+                scope: Some((scope.scope(), None).into()),
+                metrics: selected,
+                schema_url: scope.scope().schema_url().unwrap_or_default().to_owned(),
+            })
+        })
+        .collect();
+    if scope_metrics.is_empty() {
+        return MetricsData::default();
+    }
+    MetricsData {
+        resource_metrics: vec![otlp::ResourceMetrics {
+            resource: Some(metrics.resource().into()),
+            scope_metrics,
+            schema_url: metrics
+                .resource()
+                .schema_url()
+                .unwrap_or_default()
+                .to_owned(),
+        }],
     }
 }
 
