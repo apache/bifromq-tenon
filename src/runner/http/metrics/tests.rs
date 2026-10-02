@@ -54,7 +54,8 @@ fn both_formats_preserve_identity_integer_precision_and_cumulative_histograms() 
         "tenon.flow.lua.duration".to_owned(),
     ];
     let snapshot = runtime.collect(&include);
-    let body = serde_json::to_value(MetricsResponse::from(&snapshot))?;
+    let body: serde_json::Value =
+        serde_json::from_slice(&serde_json::to_vec(&MetricsResponse::from(&snapshot))?)?;
     assert_eq!(body["processes"].as_array().map(Vec::len), Some(1));
     let resource = &body["processes"][0]["resource"];
     assert_eq!(resource["tenon.node.id"], "test-node");
@@ -180,5 +181,82 @@ fn multiple_processes_share_family_headers_without_merging_series() -> io::Resul
     assert!(text.contains("tenon_pipeline_id=\"second\""));
     first.shutdown();
     second.shutdown();
+    Ok(())
+}
+
+#[test]
+fn json_preserves_decimal_boundaries_and_omits_absent_values() -> io::Result<()> {
+    use opentelemetry_proto::tonic::metrics::v1::{
+        Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
+        ResourceMetrics, ScopeMetrics, metric, number_data_point,
+    };
+
+    assert_eq!(
+        serde_json::to_vec(&MetricsResponse::from(&MetricsData::default()))?,
+        br#"{"processes":[]}"#
+    );
+    let integers = [
+        (i64::MIN, "-9223372036854775808"),
+        (0, "0"),
+        (9_007_199_254_740_993, "9007199254740993"),
+        (i64::MAX, "9223372036854775807"),
+    ];
+    let mut points: Vec<_> = integers
+        .iter()
+        .map(|&(value, _)| NumberDataPoint {
+            time_unix_nano: u64::MAX,
+            value: Some(number_data_point::Value::AsInt(value)),
+            ..Default::default()
+        })
+        .collect();
+    points.push(NumberDataPoint {
+        value: Some(number_data_point::Value::AsDouble(0.25)),
+        ..Default::default()
+    });
+    let snapshot = MetricsData {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![
+                    Metric {
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: points,
+                        })),
+                        ..Default::default()
+                    },
+                    Metric {
+                        data: Some(metric::Data::Histogram(Histogram {
+                            data_points: vec![HistogramDataPoint {
+                                time_unix_nano: u64::MAX,
+                                count: u64::MAX,
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body: serde_json::Value =
+        serde_json::from_slice(&serde_json::to_vec(&MetricsResponse::from(&snapshot))?)?;
+    let metrics = &body["processes"][0]["metrics"];
+    for (index, (_, expected)) in integers.iter().enumerate() {
+        let point = &metrics[0]["points"][index];
+        assert_eq!(point["value"], *expected);
+        assert_eq!(point["timeUnixNano"], "18446744073709551615");
+        assert!(point.get("startTimeUnixNano").is_none());
+    }
+    assert_eq!(metrics[0]["points"][4]["value"], 0.25);
+    assert_eq!(metrics[0]["points"][4]["timeUnixNano"], "0");
+    let histogram = &metrics[1]["points"][0];
+    assert_eq!(histogram["count"], "18446744073709551615");
+    assert_eq!(histogram["timeUnixNano"], "18446744073709551615");
+    assert_eq!(histogram["startTimeUnixNano"], "0");
+    for optional in ["sum", "min", "max"] {
+        assert!(histogram.get(optional).is_none());
+    }
     Ok(())
 }

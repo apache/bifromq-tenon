@@ -23,8 +23,9 @@ use opentelemetry_proto::tonic::common::v1::{KeyValue, any_value};
 use opentelemetry_proto::tonic::metrics::v1::{
     MetricsData, NumberDataPoint, metric, number_data_point,
 };
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use std::collections::BTreeMap;
+use std::fmt::Display;
 use utoipa::ToSchema;
 
 #[derive(Serialize, ToSchema)]
@@ -67,12 +68,10 @@ impl<'a> From<&'a MetricsData> for MetricsResponse<'a> {
                             .map(|point| Point::Histogram {
                                 observation: Observation {
                                     attributes: attributes(&point.attributes),
-                                    time_unix_nano: point.time_unix_nano.to_string(),
-                                    start_time_unix_nano: Some(
-                                        point.start_time_unix_nano.to_string(),
-                                    ),
+                                    time_unix_nano: point.time_unix_nano,
+                                    start_time_unix_nano: Some(point.start_time_unix_nano),
                                 },
-                                count: point.count.to_string(),
+                                count: point.count,
                                 sum: point.sum,
                                 min: point.min,
                                 max: point.max,
@@ -157,7 +156,9 @@ enum Point<'a> {
     Histogram {
         #[serde(flatten)]
         observation: Observation<'a>,
-        count: String,
+        #[serde(serialize_with = "decimal_string")]
+        #[schema(value_type = String)]
+        count: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         sum: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,16 +172,23 @@ enum Point<'a> {
 #[serde(rename_all = "camelCase")]
 struct Observation<'a> {
     attributes: Attributes<'a>,
-    time_unix_nano: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    start_time_unix_nano: Option<String>,
+    #[serde(serialize_with = "decimal_string")]
+    #[schema(value_type = String)]
+    time_unix_nano: u64,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "optional_decimal_string"
+    )]
+    #[schema(value_type = Option<String>)]
+    start_time_unix_nano: Option<u64>,
 }
 
 #[derive(Serialize, ToSchema)]
 #[serde(untagged)]
 enum Number {
     /// An exact 64-bit integer encoded as a decimal string.
-    Integer(String),
+    #[schema(value_type = String)]
+    Integer(#[serde(serialize_with = "decimal_string")] i64),
     Float(f64),
 }
 
@@ -188,14 +196,28 @@ fn number(point: &NumberDataPoint, start: Option<u64>) -> Point<'_> {
     Point::Number {
         observation: Observation {
             attributes: attributes(&point.attributes),
-            time_unix_nano: point.time_unix_nano.to_string(),
-            start_time_unix_nano: start.map(|value| value.to_string()),
+            time_unix_nano: point.time_unix_nano,
+            start_time_unix_nano: start,
         },
         value: match point.value {
-            Some(number_data_point::Value::AsInt(value)) => Number::Integer(value.to_string()),
+            Some(number_data_point::Value::AsInt(value)) => Number::Integer(value),
             Some(number_data_point::Value::AsDouble(value)) => Number::Float(value),
             None => unreachable!("the SDK supplies each number data point's value"),
         },
+    }
+}
+
+fn decimal_string<T: Display, S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(value)
+}
+
+fn optional_decimal_string<S: Serializer>(
+    value: &Option<u64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(value) => decimal_string(value, serializer),
+        None => serializer.serialize_none(),
     }
 }
 
