@@ -66,11 +66,16 @@ pub(super) fn render(snapshot: &MetricsData) -> String {
                 }
                 Some(metric::Data::Histogram(data)) => {
                     for point in &data.data_points {
-                        let labels = labels(resource, &point.attributes);
-                        writeln!(output, "{name}_count{labels} {}", point.count)
-                            .expect("String write");
+                        write!(output, "{name}_count").expect("String write");
+                        let labels_start = output.len();
+                        write_labels(&mut output, resource, &point.attributes);
+                        let labels_end = output.len();
+                        writeln!(output, " {}", point.count).expect("String write");
                         if let Some(sum) = point.sum {
-                            writeln!(output, "{name}_sum{labels} {sum}").expect("String write");
+                            write!(output, "{name}_sum").expect("String write");
+                            // Reuse count's labels without formatting them again.
+                            output.extend_from_within(labels_start..labels_end);
+                            writeln!(output, " {sum}").expect("String write");
                         }
                     }
                 }
@@ -92,12 +97,9 @@ pub(super) fn render(snapshot: &MetricsData) -> String {
                         } else {
                             point.max
                         } {
-                            writeln!(
-                                output,
-                                "{name}_{statistic}{} {value}",
-                                labels(resource, &point.attributes)
-                            )
-                            .expect("String write");
+                            write!(output, "{name}_{statistic}").expect("String write");
+                            write_labels(&mut output, resource, &point.attributes);
+                            writeln!(output, " {value}").expect("String write");
                         }
                     }
                 }
@@ -131,13 +133,14 @@ fn write_numbers(
     points: &[NumberDataPoint],
 ) {
     for point in points {
-        let labels = labels(resource, &point.attributes);
+        write!(output, "{name}").expect("String write");
+        write_labels(output, resource, &point.attributes);
         match point.value {
             Some(number_data_point::Value::AsInt(value)) => {
-                writeln!(output, "{name}{labels} {value}")
+                writeln!(output, " {value}")
             }
             Some(number_data_point::Value::AsDouble(value)) => {
-                writeln!(output, "{name}{labels} {value}")
+                writeln!(output, " {value}")
             }
             None => unreachable!("the SDK supplies each number data point's value"),
         }
@@ -146,13 +149,19 @@ fn write_numbers(
 }
 
 #[allow(clippy::expect_used, reason = "formatting into a String cannot fail")]
-fn labels(resource: &[KeyValue], point: &[KeyValue]) -> String {
-    let mut output = String::from("{");
+fn write_labels(output: &mut String, resource: &[KeyValue], point: &[KeyValue]) {
+    output.push('{');
     for (index, pair) in resource.iter().chain(point).enumerate() {
         if index > 0 {
             output.push(',');
         }
-        write!(output, "{}=\"", pair.key.replace('.', "_")).expect("String write");
+        for (part_index, part) in pair.key.split('.').enumerate() {
+            if part_index > 0 {
+                output.push('_');
+            }
+            output.push_str(part);
+        }
+        output.push_str("=\"");
         match pair.value.as_ref().and_then(|value| value.value.as_ref()) {
             Some(any_value::Value::StringValue(value)) => {
                 for character in value.chars() {
@@ -177,7 +186,6 @@ fn labels(resource: &[KeyValue], point: &[KeyValue]) -> String {
         output.push('"');
     }
     output.push('}');
-    output
 }
 
 #[cfg(test)]

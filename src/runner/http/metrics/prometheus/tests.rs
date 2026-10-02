@@ -48,3 +48,76 @@ fn catalog_prometheus_names_and_histogram_expansions_do_not_collide() -> io::Res
     }
     Ok(())
 }
+
+#[test]
+fn histogram_series_preserve_escaped_unicode_labels_and_absent_statistics() {
+    use opentelemetry_proto::tonic::common::v1::AnyValue;
+    use opentelemetry_proto::tonic::metrics::v1::{
+        Histogram, HistogramDataPoint, ResourceMetrics, ScopeMetrics,
+    };
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+
+    let attribute = |key: &str, value| KeyValue {
+        key: key.to_owned(),
+        value: Some(AnyValue { value: Some(value) }),
+        ..Default::default()
+    };
+    let snapshot = MetricsData {
+        resource_metrics: vec![ResourceMetrics {
+            resource: Some(Resource {
+                attributes: vec![attribute(
+                    "tenon.node.id",
+                    any_value::Value::StringValue("node".into()),
+                )],
+                ..Default::default()
+            }),
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "tenon.flow.lua.duration".into(),
+                    unit: "s".into(),
+                    data: Some(metric::Data::Histogram(Histogram {
+                        data_points: vec![
+                            HistogramDataPoint {
+                                attributes: vec![
+                                    attribute(
+                                        "tenon.flow.id",
+                                        any_value::Value::StringValue("quoted\"\\flow\nµ".into()),
+                                    ),
+                                    attribute("tenon.channel.index", any_value::Value::IntValue(7)),
+                                ],
+                                count: 2,
+                                sum: Some(1.0),
+                                min: Some(0.25),
+                                max: Some(0.75),
+                                ..Default::default()
+                            },
+                            HistogramDataPoint::default(),
+                        ],
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let labels =
+        r#"{tenon_node_id="node",tenon_flow_id="quoted\"\\flow\nµ",tenon_channel_index="7"}"#;
+    assert_eq!(
+        render(&snapshot),
+        format!(
+            "# HELP tenon_flow_lua_duration_seconds tenon.flow.lua.duration\n\
+             # TYPE tenon_flow_lua_duration_seconds summary\n\
+             tenon_flow_lua_duration_seconds_count{labels} 2\n\
+             tenon_flow_lua_duration_seconds_sum{labels} 1\n\
+             tenon_flow_lua_duration_seconds_count{{tenon_node_id=\"node\"}} 0\n\
+             # HELP tenon_flow_lua_duration_seconds_min tenon.flow.lua.duration cumulative min\n\
+             # TYPE tenon_flow_lua_duration_seconds_min gauge\n\
+             tenon_flow_lua_duration_seconds_min{labels} 0.25\n\
+             # HELP tenon_flow_lua_duration_seconds_max tenon.flow.lua.duration cumulative max\n\
+             # TYPE tenon_flow_lua_duration_seconds_max gauge\n\
+             tenon_flow_lua_duration_seconds_max{labels} 0.75\n"
+        )
+    );
+}
