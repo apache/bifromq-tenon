@@ -65,6 +65,24 @@ CI covers Linux/macOS on amd64/arm64, compares platform-independent Java bundle 
 
 Tests cover ordinary errors as well as malformed inputs, closure, cancellation and recovery. Add tests for a newly changed boundary, rather than copying implementation logic into a second implementation. Public fixtures must have clear provenance and reproducible generation instructions; test credentials are never deployment credentials.
 
+## Build cache lifecycle
+
+The Rust and Java verification scripts inspect checkout-local build outputs before and after validation. The maintenance line is 30 GiB across Runner, Rust SDK and Java output directories. Above that line, idle development profiles and generated documentation are removed as complete directories. Release outputs, the latest verified Java bundles and contract evidence remain available. This is maintenance between tasks, not a hard quota during compilation.
+
+Validation and maintenance share a repository lock across Git worktrees. Maintenance uses `lsof` to refuse deletion of open build files. Install `lsof` alongside Python and the native build toolchains. External build directories, linked build directories and tracked files are not deleted automatically. For custom Cargo target/build directories, use checkout-local paths; the tool reads Cargo metadata and the corresponding environment variables.
+
+Verified Java Plugin bundles retain one successfully validated input version. A new version replaces the previous cache only after its behavior checks pass. Failed builds preserve the last valid version. Temporary staging is removed on normal failure; abandoned staging is reclaimed on the next successful cache reuse or publication.
+
+Run from the checkout root:
+
+```sh
+python3 tools/build-cache.py maintain
+python3 tools/build-cache.py run -- cargo test --locked --lib
+python3 tools/build-cache.py finish
+```
+
+`run` owns the command and its process group until it exits. `finish` is for a completed temporary checkout: it removes recognized, unused build outputs while preserving source files, Git history, changes and contract evidence. It does not remove the checkout itself. It refuses maintenance while another managed task owns the repository or selected build files are open. Unexpected interruption cannot guarantee immediate cleanup; the next idle maintenance boundary reclaims abandoned experiments.
+
 ## Plugin contributions
 
 Use the standard [Rust scaffold](sdk/rust/rust-plugin-scaffold/README.md) or [Java archetype](sdk/java/README.md#generate-a-plugin), and package plugins through `cargo tenon bundle` or the Java bundle goal. Validate them through normal Runner installation and lifecycle APIs. For a new language SDK or scaffold, follow the [SDK implementation contract](sdk/plugin-sdk-contract.md) and [IPC protocol](sdk/ipc_contract.md).

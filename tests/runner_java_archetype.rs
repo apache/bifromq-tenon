@@ -63,7 +63,8 @@ use runner_http_support::{
 
 #[test]
 fn generated_java_plugins_enforce_delivery_boundaries_without_system_java() -> io::Result<()> {
-    let (packages, pending_cache) = prepare_generated_java_plugins()?;
+    let (packages, pending_cache, _cache_guard) = prepare_generated_java_plugins()?;
+    exercise_generated_java_plugins(&packages)?;
     run_generated_java_pipeline(&packages.source, &packages.sink, DeliveryScenario::Success)?;
     run_generated_java_pipeline(
         &packages.source,
@@ -84,16 +85,6 @@ fn generated_java_plugins_enforce_delivery_boundaries_without_system_java() -> i
     topology::run_dual_interface_routes(&packages.source_and_sink)?;
     topology::run_disjoint_pressure_routes(&packages)?;
     write_java_bundle_contract_evidence(&packages)?;
-    if let Some(pending_cache) = pending_cache {
-        pending_cache.publish()?;
-    }
-    Ok(())
-}
-
-#[test]
-fn generated_java_plugins_use_rust_control_and_queues() -> io::Result<()> {
-    let (packages, pending_cache) = prepare_generated_java_plugins()?;
-    exercise_generated_java_plugins(&packages)?;
     if let Some(pending_cache) = pending_cache {
         pending_cache.publish()?;
     }
@@ -124,7 +115,7 @@ fn java_build_input_hash_tracks_sources_and_ignores_build_outputs() -> io::Resul
 #[test]
 fn generated_java_package_cache_requires_every_bundle() -> io::Result<()> {
     let cache_root = tempfile::tempdir()?;
-    let destination = cache_root.path().join("verified");
+    let mut destination = cache_root.path().join("a".repeat(64));
     let packages = GeneratedJavaPackages {
         source: b"source".to_vec(),
         capacity_source: b"capacity-source".to_vec(),
@@ -138,6 +129,29 @@ fn generated_java_package_cache_requires_every_bundle() -> io::Result<()> {
     assert!(!destination.exists());
     pending.publish()?;
     assert_eq!(packages, GeneratedJavaPackages::read_from(&destination)?);
+
+    let cancelled = cache_root.path().join("b".repeat(64));
+    drop(PendingJavaPackageCache::stage(
+        cache_root.path(),
+        cancelled.clone(),
+        &packages,
+    )?);
+    assert!(!cancelled.exists());
+    assert_eq!(packages, GeneratedJavaPackages::read_from(&destination)?);
+    fs::write(cache_root.path().join("notes.txt"), b"retained evidence")?;
+    for version in ["b", "c"] {
+        let next = cache_root.path().join(version.repeat(64));
+        let pending = PendingJavaPackageCache::stage(cache_root.path(), next.clone(), &packages)?;
+        assert!(destination.exists());
+        pending.publish()?;
+        assert!(
+            !destination.exists(),
+            "Superseded Java bundles were retained"
+        );
+        destination = next;
+        assert_eq!(packages, GeneratedJavaPackages::read_from(&destination)?);
+    }
+    assert!(cache_root.path().join("notes.txt").exists());
 
     fs::remove_file(destination.join("gated-sink.tar.gz"))?;
     let Err(error) = GeneratedJavaPackages::read_from(&destination) else {
@@ -505,23 +519,35 @@ fn generated_java_document(
     .to_string())
 }
 
-fn prepare_generated_java_plugins()
--> io::Result<(GeneratedJavaPackages, Option<PendingJavaPackageCache>)> {
+fn prepare_generated_java_plugins() -> io::Result<(
+    GeneratedJavaPackages,
+    Option<PendingJavaPackageCache>,
+    fs::File,
+)> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
     let java_workspace = workspace.join("sdk/java");
     let classifier = java_plugin_platform_classifier()?;
     let cache_root = cargo_target_directory(workspace).join("runner-java-archetype");
+    fs::create_dir_all(&cache_root)?;
+    let cache_guard = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(cache_root.join(".lock"))?;
+    cache_guard.lock()?;
     let package_cache_root = cache_root.join("packages");
     let cache_directory = package_cache_root.join(java_build_fingerprint(workspace, classifier)?);
     if cache_directory.try_exists()? {
         let started = Instant::now();
         match GeneratedJavaPackages::read_from(&cache_directory) {
             Ok(packages) => {
+                retain_java_package_cache(&cache_directory)?;
                 eprintln!(
                     "Reused verified Java Plugin bundles in {:.1?}",
                     started.elapsed()
                 );
-                return Ok((packages, None));
+                return Ok((packages, None, cache_guard));
             }
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
                 fs::remove_dir_all(&cache_directory)?;
@@ -544,7 +570,32 @@ fn prepare_generated_java_plugins()
         "Built and cached verified Java Plugin bundles in {:.1?}",
         started.elapsed()
     );
-    Ok((packages, Some(pending_cache)))
+    Ok((packages, Some(pending_cache), cache_guard))
+}
+
+fn retain_java_package_cache(destination: &Path) -> io::Result<()> {
+    let root = destination
+        .parent()
+        .ok_or_else(|| io::Error::other("Java package cache has no parent"))?;
+    for entry in root.read_dir()? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let generated = (name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            || name.starts_with("runner-java-archetype-");
+        if entry.path() != destination && generated && entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path()).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "Cannot remove superseded Java package cache {}: {error}",
+                        entry.path().display()
+                    ),
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn build_generated_java_plugins_uncached(
@@ -1717,9 +1768,9 @@ impl PendingJavaPackageCache {
             staging,
             destination,
         } = self;
-        fs::rename(staging.path(), destination)?;
+        fs::rename(staging.path(), &destination)?;
         let _ = staging.keep();
-        Ok(())
+        retain_java_package_cache(&destination)
     }
 }
 

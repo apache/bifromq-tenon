@@ -18,13 +18,18 @@
 
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd "${script_dir}/.." && pwd -P)"
+
+if [[ "${TENON_BUILD_CACHE_OWNER:-}" != "${repo_root}" ]]; then
+  exec python3 "${script_dir}/build-cache.py" run -- bash "${script_dir}/verify-rust.sh" "$@"
+fi
 
 cd "${repo_root}"
 
 python3 -B -m unittest discover -s tools/tests -p test_validate_rust_test_layout.py
 python3 tools/validate-rust-test-layout.py
+python3 -B tools/tests/build_cache_test.py
 workspace_manifests=(Cargo.toml sdk/rust/Cargo.toml)
 resource_test="metrics::runtime::tests::resources::pull_snapshot_tracks_cpu_and_current_rss_without_including_children"
 for manifest in "${workspace_manifests[@]}"; do
