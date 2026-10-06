@@ -233,10 +233,7 @@ fn run_generated_java_pipeline_with_path(
         address,
         "POST",
         "/plugins",
-        &[(
-            "Content-Type",
-            "application/vnd.apache.tenon.plugin+tar+gzip",
-        )],
+        &[("Content-Type", "application/octet-stream")],
         source_package,
     )?;
     assert_eq!(
@@ -250,10 +247,7 @@ fn run_generated_java_pipeline_with_path(
         address,
         "POST",
         "/plugins",
-        &[(
-            "Content-Type",
-            "application/vnd.apache.tenon.plugin+tar+gzip",
-        )],
+        &[("Content-Type", "application/octet-stream")],
         sink_package,
     )?;
     assert_eq!(installed_sink.status, 201, "{}", installed_sink.body_text());
@@ -1937,10 +1931,7 @@ fn verify_missing_external_java(source: &[u8], sink: &[u8]) -> io::Result<()> {
             address,
             "POST",
             "/plugins",
-            &[(
-                "Content-Type",
-                "application/vnd.apache.tenon.plugin+tar+gzip",
-            )],
+            &[("Content-Type", "application/octet-stream")],
             bundle,
         )?;
         assert_eq!(response.status, 201, "{}", response.body_text());

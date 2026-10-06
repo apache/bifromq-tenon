@@ -290,7 +290,7 @@ mod server_tests {
         connection
             .write_all(
                 format!(
-                    "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/vnd.apache.tenon.plugin+tar+gzip\r\nContent-Length: 1\r\nExpect: 100-continue\r\n\r\n"
+                    "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\nContent-Length: 1\r\nExpect: 100-continue\r\n\r\n"
                 )
                 .as_bytes(),
             )

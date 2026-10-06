@@ -337,7 +337,7 @@ def verify_runner(runner, bundles, scenario, *, chain_programs=("source", "sink"
                         for bundle in bundles.values():
                             for expected in [201, 204]:
                                 status, _, body = request("POST", "/plugins", bundle.read_bytes(),
-                                                          {"Content-Type": "application/vnd.apache.tenon.plugin+tar+gzip"})
+                                                          {"Content-Type": "application/octet-stream"})
                                 assert status == expected, (status, body)
                         for identity, source, sink in [("rust-chain", *chain_programs),
                                                        ("rust-loop", "source-and-sink", "source-and-sink")]:
@@ -575,7 +575,7 @@ def verify_rejected_uploads(request, bundle):
     for content, code in [(b"not gzip", "plugin_package_invalid"),
                           (foreign_bundle.getvalue(), "plugin_platform_mismatch")]:
         status, _, body = request("POST", "/plugins", content,
-                                  {"Content-Type": "application/vnd.apache.tenon.plugin+tar+gzip"})
+                                  {"Content-Type": "application/octet-stream"})
         assert status == 422 and json.loads(body)["error"]["code"] == code, (status, body)
         status, _, body = request("GET", "/plugins")
         assert status == 200 and json.loads(body)["plugins"] == [], (status, body)

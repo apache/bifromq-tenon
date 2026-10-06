@@ -94,7 +94,7 @@ fn all_interfaces_share_one_sorted_runtime_per_exact_program() -> io::Result<()>
 
 #[test]
 fn only_the_last_snapshot_release_allows_selected_program_uninstall() -> io::Result<()> {
-    let (directory, mut store) = empty_store()?;
+    let (_directory, mut store) = empty_store()?;
     for interface in [PluginInterface::Source, PluginInterface::Sink] {
         store
             .install(Cursor::new(valid_program_package(interface)?))
@@ -104,7 +104,12 @@ fn only_the_last_snapshot_release_allows_selected_program_uninstall() -> io::Res
     let sink = identity("com.example.sink")?;
     let first = capture_programs(&store, [source.clone(), source.clone()])?;
     let second = capture_programs(&store, [source.clone()])?;
-    let source_directory = directory.path().join("com.example.source/1.0.0");
+    let source_directory = std::path::PathBuf::from(&first.runtimes()[0].program_directory);
+    let sink_directory = store
+        .lookup(sink.program_name(), sink.exact_version())
+        .ok_or_else(|| io::Error::other("Sink Program is missing"))?
+        .directory()
+        .to_path_buf();
 
     assert!(matches!(
         store.uninstall(source.program_name(), source.exact_version()),
@@ -127,7 +132,7 @@ fn only_the_last_snapshot_release_allows_selected_program_uninstall() -> io::Res
             .lookup(sink.program_name(), sink.exact_version())
             .is_none()
     );
-    assert!(!directory.path().join("com.example.sink/1.0.0").exists());
+    assert!(!sink_directory.exists());
 
     drop(first);
     assert!(matches!(
@@ -194,8 +199,12 @@ fn equivalent_install_and_unrelated_changes_preserve_snapshot_material_and_reten
 
 fn empty_store() -> io::Result<(TempDir, PluginProgramStore)> {
     let directory = tempfile::tempdir()?;
-    let store =
-        PluginProgramStore::recover(directory.path().to_owned()).map_err(io::Error::other)?;
+    let store = PluginProgramStore::recover(
+        directory.path().to_owned(),
+        directory.path().to_owned(),
+        std::sync::Arc::new(crate::runner::extensions::ByPass),
+    )
+    .map_err(io::Error::other)?;
     Ok((directory, store))
 }
 

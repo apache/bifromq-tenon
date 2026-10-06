@@ -122,8 +122,12 @@ async fn cancellation_after_end_does_not_abandon_installation_during_shutdown() 
         shutdown.await.map_err(io::Error::other)?;
     }
     drop(supervisor);
-    let recovered = PluginProgramStore::recover(directory.path().join("plugins/programs"))
-        .map_err(io::Error::other)?;
+    let recovered = PluginProgramStore::recover(
+        directory.path().join("plugins/programs"),
+        directory.path().join("plugins/programs"),
+        std::sync::Arc::new(crate::runner::extensions::ByPass),
+    )
+    .map_err(io::Error::other)?;
     assert_eq!(recovered.programs().count(), 3);
     Ok(())
 }

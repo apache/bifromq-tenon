@@ -19,15 +19,16 @@
 
 //! Restores Runner desired state from the private Stores.
 //!
-//! Startup verifies committed Documents, then asks the sole Program Store to
-//! recover and clean its private installation tree. Invalid Documents or Store
-//! root/cleanup failures stop startup before any UDS or child is created.
-//! Invalid Programs are removed; their Documents remain as unready desired state.
+//! Startup validates saved Documents, then restores the Program Store.
+//! Invalid Documents or Store root and cleanup failures stop startup.
+//! Package access or validation failure stops startup and keeps the saved input.
+//! Runtime files are reconstructed from the saved packages.
+//! No new UDS or child process is created before recovery completes.
 
 use crate::config::RunnerConfig;
 use crate::identifiers::TenonDocumentId;
 use crate::runner::document_store::{TenonDocumentStore, TenonDocumentStoreError};
-use crate::runner::extensions::DocumentProtection;
+use crate::runner::extensions::ArtifactProtection;
 use crate::runner::plugin::store::{PluginProgramStore, PluginStoreError};
 use crate::runner::state_directory::RunnerStateLayout;
 use crate::tenon_document::verified::VerifiedTenonDocument;
@@ -38,6 +39,7 @@ use crate::tenon_document::{
 use sha2::{Digest as _, Sha256};
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -78,11 +80,13 @@ impl RecoveredTenonDocument {
 ///
 /// Returns [`RunnerRecoveryError`] when a root Store operation fails, a
 /// committed Document cannot be parsed or verified, its filename identity is
-/// inconsistent, or Program cleanup cannot complete. Invalid Programs are removed.
+/// inconsistent, or Program recovery or cleanup cannot complete.
+/// Package access or validation failure keeps the saved input.
 pub(crate) fn recover(
     config: &RunnerConfig,
     state_layout: &RunnerStateLayout,
-    protection: &Arc<dyn DocumentProtection>,
+    protection: &Arc<dyn ArtifactProtection>,
+    runtime_directory: &Path,
 ) -> Result<RecoveredRunnerState, RunnerRecoveryError> {
     let verifier = config
         .tenon_document_verifier()
@@ -122,7 +126,12 @@ pub(crate) fn recover(
     }
     verified.sort_unstable_by(|left, right| left.1.id().as_str().cmp(right.1.id().as_str()));
 
-    let programs = load_program_store(state_layout)?;
+    let programs = PluginProgramStore::recover(
+        state_layout.plugin_program_store_directory(),
+        runtime_directory.to_path_buf(),
+        Arc::clone(protection),
+    )
+    .map_err(RunnerRecoveryError::PluginStore)?;
     let documents = verified
         .into_iter()
         .map(|(source, document)| RecoveredTenonDocument { source, document })
@@ -133,13 +142,6 @@ pub(crate) fn recover(
         documents,
         programs,
     })
-}
-
-fn load_program_store(
-    state_layout: &RunnerStateLayout,
-) -> Result<PluginProgramStore, RunnerRecoveryError> {
-    PluginProgramStore::recover(state_layout.plugin_program_store_directory())
-        .map_err(RunnerRecoveryError::PluginStore)
 }
 
 /// A fatal private-state failure discovered before the Runner starts serving.

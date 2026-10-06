@@ -18,9 +18,9 @@
  */
 
 use super::{
-    MAX_ARCHIVE_METADATA_BYTES, MAX_PACKAGE_PATH_BYTES, MAX_PACKAGE_PATH_COMPONENT_BYTES,
-    PackageEntryKind, PackageLimits, PluginConfigSchema, PluginPackageError,
-    extract_package_archive, package_files_are_identical, stage_package_archive,
+    MAX_PACKAGE_PATH_BYTES, MAX_PACKAGE_PATH_COMPONENT_BYTES, PackageEntryKind, PackageLimits,
+    PluginConfigSchema, PluginPackageError, extract_package_directory, package_files_are_identical,
+    stage_package_directory,
 };
 use flate2::Compression;
 use flate2::read::GzDecoder as ReadGzDecoder;
@@ -60,12 +60,14 @@ fn archive_modes_do_not_change_private_staging_permissions() -> io::Result<()> {
 
     let restrictive_parent = tempfile::tempdir()?;
     let permissive_parent = tempfile::tempdir()?;
-    let restrictive = stage_package_archive(
+    let restrictive = stage_package_directory(
+        &crate::runner::extensions::ByPass,
         Cursor::new(package_with_modes(0o000)?),
         restrictive_parent.path(),
     )
     .map_err(io::Error::other)?;
-    let permissive = stage_package_archive(
+    let permissive = stage_package_directory(
+        &crate::runner::extensions::ByPass,
         Cursor::new(package_with_modes(0o777)?),
         permissive_parent.path(),
     )
@@ -96,8 +98,12 @@ fn archive_modes_do_not_change_private_staging_permissions() -> io::Result<()> {
 #[test]
 fn staged_directory_is_removed_when_owner_is_dropped() -> io::Result<()> {
     let staging_parent = tempfile::tempdir()?;
-    let staged = stage_package_archive(Cursor::new(archive_fixture()?), staging_parent.path())
-        .map_err(io::Error::other)?;
+    let staged = stage_package_directory(
+        &crate::runner::extensions::ByPass,
+        Cursor::new(archive_fixture()?),
+        staging_parent.path(),
+    )
+    .map_err(io::Error::other)?;
     let path = staged.path().to_path_buf();
     assert!(path.is_dir());
 
@@ -179,15 +185,23 @@ fn bounded_gnu_and_pax_paths_remain_ordinary_program_files() -> io::Result<()> {
     let gnu_path = format!("lib/{}.bin", "long-name-".repeat(20));
     let gnu_package = package_with_path(&gnu_path, b"gnu path")?;
     let staging_parent = tempfile::tempdir()?;
-    let staged = stage_package_archive(Cursor::new(gnu_package), staging_parent.path())
-        .map_err(io::Error::other)?;
+    let staged = stage_package_directory(
+        &crate::runner::extensions::ByPass,
+        Cursor::new(gnu_package),
+        staging_parent.path(),
+    )
+    .map_err(io::Error::other)?;
     assert_eq!(std::fs::read(staged.path().join(gnu_path))?, b"gnu path");
 
     let pax_path = format!("resources/{}.txt", "pax-name-".repeat(20));
     let pax_package = package_with_pax_path(&pax_path)?;
     let staging_parent = tempfile::tempdir()?;
-    let staged = stage_package_archive(Cursor::new(pax_package), staging_parent.path())
-        .map_err(io::Error::other)?;
+    let staged = stage_package_directory(
+        &crate::runner::extensions::ByPass,
+        Cursor::new(pax_package),
+        staging_parent.path(),
+    )
+    .map_err(io::Error::other)?;
     assert_eq!(std::fs::read(staged.path().join(pax_path))?, b"pax path");
     Ok(())
 }
@@ -301,15 +315,11 @@ fn implementation_limits_fail_before_unbounded_extraction() -> io::Result<()> {
     let package = archive_fixture()?;
     for limits in [
         PackageLimits {
-            archive_entries: 2,
+            entries: 2,
             ..PackageLimits::production()
         },
         PackageLimits {
             extracted_file_bytes: 1,
-            ..PackageLimits::production()
-        },
-        PackageLimits {
-            tar_stream_bytes: 512,
             ..PackageLimits::production()
         },
     ] {
@@ -321,8 +331,12 @@ fn implementation_limits_fail_before_unbounded_extraction() -> io::Result<()> {
 #[test]
 fn fixed_control_files_are_bounded_before_reading() -> io::Result<()> {
     let staging_parent = tempfile::tempdir()?;
-    let staged = stage_package_archive(Cursor::new(archive_fixture()?), staging_parent.path())
-        .map_err(io::Error::other)?;
+    let staged = stage_package_directory(
+        &crate::runner::extensions::ByPass,
+        Cursor::new(archive_fixture()?),
+        staging_parent.path(),
+    )
+    .map_err(io::Error::other)?;
     for path in [
         "manifest.json",
         "config.schema.json",
@@ -342,7 +356,7 @@ fn materialized_entry_limit_includes_implicit_directories() -> io::Result<()> {
     assert_package_limit(
         package,
         PackageLimits {
-            archive_entries: 2,
+            entries: 2,
             ..PackageLimits::production()
         },
     )
@@ -352,7 +366,7 @@ fn materialized_entry_limit_includes_implicit_directories() -> io::Result<()> {
 fn oversized_archive_metadata_is_rejected_before_allocation_can_grow_unbounded() -> io::Result<()> {
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut archive = Builder::new(encoder);
-    let oversized = vec![b'x'; MAX_ARCHIVE_METADATA_BYTES as usize];
+    let oversized = vec![b'x'; 64 * 1024];
     archive.append_pax_extensions([("comment", oversized.as_slice())])?;
     append_file(&mut archive, "entry", b"value", 0o644)?;
     let encoder = archive.into_inner()?;
@@ -399,9 +413,14 @@ proptest! {
 
 fn assert_package_limit(package: Vec<u8>, limits: PackageLimits) -> io::Result<()> {
     let staging_parent = tempfile::tempdir()?;
-    let error = extract_package_archive(Cursor::new(package), staging_parent.path(), limits)
-        .err()
-        .ok_or_else(|| io::Error::other("oversized Plugin package was accepted"))?;
+    let error = extract_package_directory(
+        &crate::runner::extensions::ByPass,
+        Cursor::new(package),
+        staging_parent.path(),
+        limits,
+    )
+    .err()
+    .ok_or_else(|| io::Error::other("oversized Plugin package was accepted"))?;
     assert_eq!(error.code(), "plugin_package_too_large");
     assert!(staging_parent.path().read_dir()?.next().is_none());
     Ok(())
@@ -415,9 +434,13 @@ fn assert_error_code(package: Vec<u8>, expected: &str) -> io::Result<()> {
 
 fn stage_error(package: Vec<u8>) -> io::Result<PluginPackageError> {
     let staging_parent = tempfile::tempdir()?;
-    stage_package_archive(Cursor::new(package), staging_parent.path())
-        .err()
-        .ok_or_else(|| io::Error::other("invalid Plugin package was accepted"))
+    stage_package_directory(
+        &crate::runner::extensions::ByPass,
+        Cursor::new(package),
+        staging_parent.path(),
+    )
+    .err()
+    .ok_or_else(|| io::Error::other("invalid Plugin package was accepted"))
 }
 
 fn archive_fixture() -> io::Result<Vec<u8>> {

@@ -31,10 +31,7 @@ fn real_pipeline_flow_metrics_survive_replacement_and_retire_with_the_flow() -> 
             address,
             "POST",
             "/plugins",
-            &[(
-                "Content-Type",
-                "application/vnd.apache.tenon.plugin+tar+gzip"
-            )],
+            &[("Content-Type", "application/octet-stream")],
             &plugin_package(PluginInterface::SourceAndSink)?
         )?
         .status,

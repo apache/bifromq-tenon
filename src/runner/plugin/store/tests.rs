@@ -18,7 +18,7 @@
  */
 
 use super::PluginProgramInstallResult;
-use super::filesystem::{DurablePublicationFilesystem, sync_directory, sync_package_tree};
+use super::filesystem::{DurablePublicationFilesystem, sync_directory};
 use super::test_support::program_count;
 use super::{
     PluginProgramEntry, PluginProgramStore, PluginStoreError, PluginUninstallOutcome,
@@ -44,8 +44,9 @@ fn first_install_publishes_disk_and_memory_in_one_store_mutation() -> io::Result
     let root = prepare_store_root(parent.path())?;
     let mut store = recover_store(root.clone())?;
 
+    let package = valid_source_program_package()?;
     let outcome = store
-        .install(Cursor::new(valid_source_program_package()?))
+        .install(Cursor::new(&package))
         .map_err(io::Error::other)?;
     let PluginProgramInstallResult::Installed(identity) = outcome else {
         return Err(io::Error::other("first install was reported as unchanged"));
@@ -56,7 +57,9 @@ fn first_install_publishes_disk_and_memory_in_one_store_mutation() -> io::Result
     );
     let entry = available_entry(&store, "com.example.source")?;
 
-    assert_eq!(entry.directory(), root.join("com.example.source/1.0.0"));
+    assert!(entry.directory().starts_with(&store.runtime_directory));
+    assert!(!entry.directory().starts_with(&root));
+    assert_eq!(fs::read(&entry.original.path)?, package);
     assert_eq!(fs::read(entry.directory().join("bin/start"))?, b"program");
     #[cfg(unix)]
     {
@@ -138,8 +141,12 @@ fn same_identity_with_different_content_is_never_overwritten() -> io::Result<()>
 
     assert_eq!(error.code(), "plugin_version_conflict");
     assert!(
-        fs::read_to_string(root.join("com.example.source/1.0.0/manifest.json"))?
-            .contains("./bin/start")
+        fs::read_to_string(
+            available_entry(&store, "com.example.source")?
+                .directory()
+                .join("manifest.json")
+        )?
+        .contains("./bin/start")
     );
     assert_available(&store, "com.example.source")?;
     Ok(())
@@ -160,7 +167,9 @@ fn recovery_owns_all_interfaces_in_one_identity_map() -> io::Result<()> {
             .map_err(io::Error::other)?;
     }
 
+    let old_runtime = store.runtime_directory.clone();
     drop(store);
+    fs::remove_dir_all(old_runtime)?;
     let recovered = recover_store(root)?;
 
     assert_eq!(program_count(&recovered), 3);
@@ -189,7 +198,7 @@ fn recovery_owns_all_interfaces_in_one_identity_map() -> io::Result<()> {
 }
 
 #[test]
-fn recovery_deletes_invalid_versions_and_keeps_valid_siblings() -> io::Result<()> {
+fn recovery_preserves_invalid_original_packages_and_valid_siblings() -> io::Result<()> {
     let parent = tempfile::tempdir()?;
     let root = prepare_store_root(parent.path())?;
     let mut store = recover_store(root.clone())?;
@@ -198,22 +207,20 @@ fn recovery_deletes_invalid_versions_and_keeps_valid_siblings() -> io::Result<()
             .install(Cursor::new(valid_program_package(interface)?))
             .map_err(io::Error::other)?;
     }
+    let invalid = available_entry(&store, "com.example.sink")?
+        .original
+        .path
+        .clone();
+    let valid = available_entry(&store, "com.example.source")?
+        .original
+        .path
+        .clone();
+    let valid_bytes = fs::read(&valid)?;
     drop(store);
-    let invalid = root.join("com.example.sink/1.0.0/config.schema.json");
-    make_writable(&invalid)?;
-    fs::write(&invalid, b"{}")?;
-    make_private_file(&invalid)?;
-    let invalid_sibling = root.join("com.example.source/2.0.0");
-    fs::create_dir(&invalid_sibling)?;
-    make_private_directory(&invalid_sibling)?;
-
-    let recovered = recover_store(root.clone())?;
-
-    assert_available(&recovered, "com.example.source")?;
-    assert!(lookup(&recovered, "com.example.sink")?.is_none());
-    assert!(!root.join("com.example.sink/1.0.0").exists());
-    assert!(!invalid_sibling.exists());
-    assert_eq!(program_count(&recovered), 1);
+    fs::write(&invalid, b"invalid package")?;
+    assert!(recover_store(root).is_err());
+    assert_eq!(fs::read(invalid)?, b"invalid package");
+    assert_eq!(fs::read(valid)?, valid_bytes);
     Ok(())
 }
 
@@ -234,60 +241,59 @@ fn healthy_namespace_absence_is_missing_without_a_saved_state() -> io::Result<()
 
 #[cfg(unix)]
 #[test]
-fn recovery_rejects_identity_permission_and_link_drift_inside_a_package() -> io::Result<()> {
+fn recovery_preserves_original_packages_with_identity_permission_or_link_errors() -> io::Result<()>
+{
     use std::os::unix::fs::{PermissionsExt as _, symlink};
-
     enum Corruption {
-        DirectoryIdentity,
-        FilePermission,
+        Identity,
+        Permission,
         SymbolicLink,
         HardLink,
     }
     for corruption in [
-        Corruption::DirectoryIdentity,
-        Corruption::FilePermission,
+        Corruption::Identity,
+        Corruption::Permission,
         Corruption::SymbolicLink,
         Corruption::HardLink,
     ] {
         let parent = tempfile::tempdir()?;
         let root = prepare_store_root(parent.path())?;
         let mut store = recover_store(root.clone())?;
-        for interface in [PluginInterface::Source, PluginInterface::Sink] {
-            store
-                .install(Cursor::new(valid_program_package(interface)?))
-                .map_err(io::Error::other)?;
-        }
+        store
+            .install(Cursor::new(valid_source_program_package()?))
+            .map_err(io::Error::other)?;
+        let saved = available_entry(&store, "com.example.source")?
+            .original
+            .path
+            .clone();
         drop(store);
-        let version = root.join("com.example.source/1.0.0");
-        let program = version.join("bin/start");
-        let outside = parent.path().join("outside-program");
+        let outside = parent.path().join("outside-package");
         fs::write(&outside, b"external-owner")?;
         make_private_file(&outside)?;
-        let invalid_version = match corruption {
-            Corruption::DirectoryIdentity => {
-                let destination = root.join("com.example.source/2.0.0");
-                fs::rename(&version, &destination)?;
+        let invalid = match corruption {
+            Corruption::Identity => {
+                let destination =
+                    saved.with_file_name(format!(".tenon-artifact-{}", "0".repeat(64)));
+                fs::rename(&saved, &destination)?;
                 destination
             }
-            Corruption::FilePermission => {
-                fs::set_permissions(&program, fs::Permissions::from_mode(0o644))?;
-                version
+            Corruption::Permission => {
+                fs::set_permissions(&saved, fs::Permissions::from_mode(0o644))?;
+                saved
             }
             Corruption::SymbolicLink => {
-                fs::remove_file(&program)?;
-                symlink(&outside, &program)?;
-                version
+                fs::remove_file(&saved)?;
+                symlink(&outside, &saved)?;
+                saved
             }
             Corruption::HardLink => {
-                fs::remove_file(&program)?;
-                fs::hard_link(&outside, &program)?;
-                version
+                fs::remove_file(&saved)?;
+                fs::hard_link(&outside, &saved)?;
+                saved
             }
         };
-        let recovered = recover_store(root)?;
-        assert_eq!(program_count(&recovered), 1);
-        assert_available(&recovered, "com.example.sink")?;
-        assert!(!invalid_version.exists());
+        assert!(recover_store(root).is_err());
+        assert!(fs::symlink_metadata(invalid).is_ok());
         assert_eq!(fs::read(&outside)?, b"external-owner");
         assert_eq!(fs::metadata(&outside)?.permissions().mode() & 0o777, 0o500);
     }
@@ -385,7 +391,7 @@ fn install_failures_before_rename_recover_without_publishing_an_entry() -> io::R
     for fail_at in [
         PublicationPoint::SyncProgramDirectory,
         PublicationPoint::SyncStoreRoot,
-        PublicationPoint::SyncPackageTree,
+        PublicationPoint::SyncPackageFile,
         PublicationPoint::Rename,
     ] {
         let parent = tempfile::tempdir()?;
@@ -401,8 +407,10 @@ fn install_failures_before_rename_recover_without_publishing_an_entry() -> io::R
 
         assert_eq!(error.code(), "plugin_store_internal_error");
         assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(program_count(&store), 0);
+        assert_eq!(fs::read_dir(&store.runtime_directory)?.count(), 0);
         drop(store);
-        assert!(!root.join("com.example.source/1.0.0").exists());
+        assert!(!source_package_path(&root)?.exists());
         let mut recovered = recover_store(root)?;
         assert!(lookup(&recovered, "com.example.source")?.is_none());
         let retry = recovered
@@ -428,6 +436,9 @@ fn install_failure_after_rename_recovers_the_published_program() -> io::Result<(
 
     assert_eq!(error.code(), "plugin_store_internal_error");
     assert!(std::error::Error::source(&error).is_some());
+    assert_eq!(program_count(&store), 0);
+    assert_eq!(fs::read_dir(&store.runtime_directory)?.count(), 0);
+    assert_eq!(fs::read(source_package_path(&root)?)?, package);
     drop(store);
     let mut recovered = recover_store(root)?;
     assert_available(&recovered, "com.example.source")?;
@@ -450,14 +461,14 @@ fn install_reports_external_deletion_and_retains_entry_ownership_until_shutdown(
         .map_err(io::Error::other)?;
     let entry = Arc::clone(available_entry(&store, "com.example.source")?);
     let weak = Arc::downgrade(&entry);
-    fs::remove_dir_all(root.join("com.example.source/1.0.0"))?;
+    fs::remove_file(source_package_path(&root)?)?;
 
     let error = store
         .install(Cursor::new(package))
         .err()
         .ok_or_else(|| io::Error::other("external deletion was silently repaired"))?;
 
-    assert_eq!(error.code(), "plugin_store_integrity_invalid");
+    assert_eq!(error.code(), "plugin_store_internal_error");
     drop(entry);
     assert!(weak.upgrade().is_some());
     drop(store);
@@ -473,7 +484,9 @@ fn install_reports_external_byte_drift_before_conflict_comparison() -> io::Resul
     store
         .install(Cursor::new(valid_source_program_package()?))
         .map_err(io::Error::other)?;
-    let resource = root.join("com.example.source/1.0.0/resources/data.bin");
+    let resource = available_entry(&store, "com.example.source")?
+        .directory()
+        .join("resources/data.bin");
     make_writable(&resource)?;
     fs::write(&resource, b"beta")?;
     make_private_file(&resource)?;
@@ -508,7 +521,7 @@ fn uninstall_removes_disk_and_memory_in_one_store_mutation() -> io::Result<()> {
 
     assert_eq!(outcome, PluginUninstallOutcome::Uninstalled);
     assert!(store.lookup(&program_name, &exact_version).is_none());
-    assert!(!root.join("com.example.source/1.0.0").exists());
+    assert!(!source_package_path(&root)?.exists());
     assert!(!deletion_tombstone(&root).exists());
     Ok(())
 }
@@ -531,7 +544,7 @@ fn uninstall_rejects_an_entry_with_an_external_reference() -> io::Result<()> {
         .ok_or_else(|| io::Error::other("referenced Program was uninstalled"))?;
 
     assert_eq!(error.code(), "plugin_in_use");
-    assert!(root.join("com.example.source/1.0.0").is_dir());
+    assert!(source_package_path(&root)?.is_file());
     assert!(matches!(
         store.lookup(&program_name, &exact_version),
         Some(current) if Arc::ptr_eq(current, &entry)
@@ -557,7 +570,7 @@ fn uninstall_rejects_a_weak_reference_until_it_is_released() -> io::Result<()> {
         .ok_or_else(|| io::Error::other("weakly referenced Program was uninstalled"))?;
 
     assert_eq!(error.code(), "plugin_in_use");
-    assert!(root.join("com.example.source/1.0.0").is_dir());
+    assert!(source_package_path(&root)?.is_file());
     drop(weak);
     assert_eq!(
         store
@@ -576,7 +589,7 @@ fn uninstall_reports_an_exact_path_removed_outside_the_store() -> io::Result<()>
     store
         .install(Cursor::new(valid_source_program_package()?))
         .map_err(io::Error::other)?;
-    fs::remove_dir_all(root.join("com.example.source/1.0.0"))?;
+    fs::remove_file(source_package_path(&root)?)?;
 
     let error = store
         .uninstall(&source_program_name()?, &exact_version()?)
@@ -608,7 +621,7 @@ fn uninstall_of_a_missing_identity_is_idempotent() -> io::Result<()> {
 
 #[test]
 fn uninstall_failures_before_rename_recover_the_existing_program() -> io::Result<()> {
-    for fail_at in [UninstallPoint::InspectTarget, UninstallPoint::Rename] {
+    for fail_at in [UninstallPoint::InspectTombstone, UninstallPoint::Rename] {
         let parent = tempfile::tempdir()?;
         let root = prepare_store_root(parent.path())?;
         let mut store = recover_store(root.clone())?;
@@ -635,7 +648,7 @@ fn uninstall_failures_before_rename_recover_the_existing_program() -> io::Result
             .uninstall(&source_program_name()?, &exact_version()?)
             .map_err(io::Error::other)?;
         assert_eq!(outcome, PluginUninstallOutcome::Uninstalled);
-        assert!(!root.join("com.example.source/1.0.0").exists());
+        assert!(!source_package_path(&root)?.exists());
     }
     Ok(())
 }
@@ -644,6 +657,7 @@ fn uninstall_failures_before_rename_recover_the_existing_program() -> io::Result
 fn uninstall_failures_after_rename_recover_as_missing() -> io::Result<()> {
     for fail_at in [
         UninstallPoint::SyncParent,
+        UninstallPoint::RemoveRuntime,
         UninstallPoint::RemoveTombstone,
         UninstallPoint::SyncCleanup,
     ] {
@@ -666,7 +680,7 @@ fn uninstall_failures_after_rename_recover_as_missing() -> io::Result<()> {
 
         assert_eq!(error.code(), "plugin_store_internal_error");
         assert!(std::error::Error::source(&error).is_some());
-        assert!(!root.join("com.example.source/1.0.0").exists());
+        assert!(!source_package_path(&root)?.exists());
         assert_eq!(
             deletion_tombstone(&root).exists(),
             fail_at != UninstallPoint::SyncCleanup
@@ -760,8 +774,7 @@ fn incomplete_namespace_enumeration_deletes_the_whole_namespace() -> io::Result<
         path: namespace.clone(),
     };
 
-    let recovered =
-        PluginProgramStore::recover_with_filesystem(root, &filesystem).map_err(io::Error::other)?;
+    let recovered = recover_with_filesystem(root, &filesystem).map_err(io::Error::other)?;
 
     assert!(!namespace.exists());
     assert!(lookup(&recovered, "com.example.source")?.is_none());
@@ -781,7 +794,7 @@ fn incomplete_root_enumeration_aborts_without_deleting_the_root() -> io::Result<
         path: root.clone(),
     };
 
-    let error = PluginProgramStore::recover_with_filesystem(root.clone(), &filesystem)
+    let error = recover_with_filesystem(root.clone(), &filesystem)
         .err()
         .ok_or_else(|| io::Error::other("incomplete root enumeration was accepted"))?;
 
@@ -817,7 +830,7 @@ fn cleanup_and_parent_sync_failures_abort_recovery_and_can_be_retried_at_startup
             },
         };
 
-        let error = PluginProgramStore::recover_with_filesystem(root.clone(), &filesystem)
+        let error = recover_with_filesystem(root.clone(), &filesystem)
             .err()
             .ok_or_else(|| io::Error::other("cleanup failure was ignored"))?;
 
@@ -837,9 +850,13 @@ fn missing_root_is_fatal_and_is_not_created() -> io::Result<()> {
     let parent = tempfile::tempdir()?;
     let root = parent.path().join("plugins/programs");
 
-    let error = PluginProgramStore::recover(root.clone())
-        .err()
-        .ok_or_else(|| io::Error::other("missing Program Store was treated as empty"))?;
+    let error = PluginProgramStore::recover(
+        root.clone(),
+        root.clone(),
+        Arc::new(crate::runner::extensions::ByPass),
+    )
+    .err()
+    .ok_or_else(|| io::Error::other("missing Program Store was treated as empty"))?;
 
     assert_eq!(error.code(), "plugin_store_internal_error");
     assert!(!root.exists());
@@ -960,8 +977,37 @@ fn java_target_bundles_install_idempotently_and_recover() -> io::Result<()> {
     Ok(())
 }
 
+fn recover_with_filesystem(
+    directory: PathBuf,
+    filesystem: &impl PublicationFilesystem,
+) -> Result<PluginProgramStore, PluginStoreError> {
+    let parent = directory
+        .parent()
+        .ok_or_else(|| PluginStoreError::StoreIntegrityInvalid {
+            path: directory.clone(),
+        })?;
+    let runtime = tempfile::tempdir_in(parent)
+        .map_err(|source| PluginStoreError::FilesystemOperationFailed {
+            path: directory.clone(),
+            source,
+        })?
+        .keep();
+    PluginProgramStore::recover_using(
+        directory,
+        runtime,
+        Arc::new(crate::runner::extensions::ByPass),
+        filesystem,
+    )
+}
+
 fn recover_store(root: PathBuf) -> io::Result<PluginProgramStore> {
-    PluginProgramStore::recover(root).map_err(io::Error::other)
+    recover_with_filesystem(root, &DurablePublicationFilesystem).map_err(io::Error::other)
+}
+
+fn source_package_path(root: &Path) -> io::Result<PathBuf> {
+    Ok(root
+        .join("com.example.source")
+        .join(super::original_file_name(&exact_version()?)))
 }
 
 fn lookup<'a>(
@@ -982,7 +1028,7 @@ fn exact_version() -> io::Result<ExactVersion> {
 }
 
 fn deletion_tombstone(root: &Path) -> PathBuf {
-    root.join("com.example.source/.tenon-plugin-delete-1.0.0")
+    root.join("com.example.source/.tenon-plugin-delete-92521fc3cbd964bdc9f584a991b89fddaa5754ed1cc96d6d42445338669c1305")
 }
 
 fn available_entry<'a>(
@@ -1049,7 +1095,7 @@ fn make_private_file(_path: &Path) -> io::Result<()> {
 enum PublicationPoint {
     SyncProgramDirectory,
     SyncStoreRoot,
-    SyncPackageTree,
+    SyncPackageFile,
     Rename,
     SyncPublishedDirectory,
 }
@@ -1090,11 +1136,10 @@ impl FaultingPublicationFilesystem {
 }
 
 impl PublicationFilesystem for FaultingPublicationFilesystem {
-    fn sync_package_tree(&self, root: &Path) -> Result<(), PluginStoreError> {
-        self.record(PublicationPoint::SyncPackageTree, root)?;
-        sync_package_tree(root)
+    fn sync_file(&self, path: &Path) -> Result<(), PluginStoreError> {
+        self.record(PublicationPoint::SyncPackageFile, path)?;
+        DurablePublicationFilesystem.sync_file(path)
     }
-
     fn rename(&self, source: &Path, target: &Path) -> Result<(), PluginStoreError> {
         self.record(PublicationPoint::Rename, target)?;
         fs::rename(source, target).map_err(|source| PluginStoreError::FilesystemOperationFailed {
@@ -1111,9 +1156,10 @@ impl PublicationFilesystem for FaultingPublicationFilesystem {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UninstallPoint {
-    InspectTarget,
+    InspectTombstone,
     Rename,
     SyncParent,
+    RemoveRuntime,
     RemoveTombstone,
     SyncCleanup,
 }
@@ -1133,10 +1179,6 @@ impl FaultingUninstallFilesystem {
 }
 
 impl PublicationFilesystem for FaultingUninstallFilesystem {
-    fn sync_package_tree(&self, root: &Path) -> Result<(), PluginStoreError> {
-        sync_package_tree(root)
-    }
-
     fn rename(&self, source: &Path, target: &Path) -> Result<(), PluginStoreError> {
         if self.fail_at == UninstallPoint::Rename {
             return Err(PluginStoreError::FilesystemOperationFailed {
@@ -1151,7 +1193,7 @@ impl PublicationFilesystem for FaultingUninstallFilesystem {
     }
 
     fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
-        if self.fail_at == UninstallPoint::InspectTarget {
+        if self.fail_at == UninstallPoint::InspectTombstone {
             return Err(io::Error::other("Injected uninstall metadata failure"));
         }
         fs::symlink_metadata(path)
@@ -1172,7 +1214,13 @@ impl PublicationFilesystem for FaultingUninstallFilesystem {
     }
 
     fn remove_entry(&self, path: &Path) -> Result<(), PluginStoreError> {
-        if self.fail_at == UninstallPoint::RemoveTombstone {
+        let is_tombstone = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(super::DELETION_TOMBSTONE_PREFIX));
+        if (self.fail_at == UninstallPoint::RemoveTombstone && is_tombstone)
+            || (self.fail_at == UninstallPoint::RemoveRuntime && !is_tombstone)
+        {
             return Err(PluginStoreError::FilesystemOperationFailed {
                 path: path.to_path_buf(),
                 source: io::Error::other("Injected tombstone cleanup failure"),
@@ -1230,10 +1278,6 @@ impl PublicationFilesystem for FaultingRecoveryFilesystem {
             });
         }
         sync_directory(path)
-    }
-
-    fn sync_package_tree(&self, root: &Path) -> Result<(), PluginStoreError> {
-        sync_package_tree(root)
     }
 
     fn rename(&self, source: &Path, target: &Path) -> Result<(), PluginStoreError> {
@@ -1318,3 +1362,5 @@ fn installation_does_not_execute_or_probe_the_declared_command() -> io::Result<(
     assert!(!parent.path().join("marker-command.executed").exists());
     Ok(())
 }
+
+mod protected;

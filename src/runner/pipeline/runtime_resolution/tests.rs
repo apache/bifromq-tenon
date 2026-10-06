@@ -324,7 +324,7 @@ fn bidirectional_plans_retain_original_entries_until_the_last_plan_is_dropped() 
         store.uninstall(&name, &version).map_err(io::Error::other)?,
         PluginUninstallOutcome::Uninstalled
     );
-    assert!(!directory.path().join("com.example.gateway/1.0.0").exists());
+    assert!(!directory.path().join("com.example.gateway/.tenon-artifact-92521fc3cbd964bdc9f584a991b89fddaa5754ed1cc96d6d42445338669c1305").exists());
     Ok(())
 }
 
@@ -448,8 +448,12 @@ struct RuntimeCase {
 
 fn empty_store() -> io::Result<(TempDir, PluginProgramStore)> {
     let directory = tempfile::tempdir()?;
-    let store =
-        PluginProgramStore::recover(directory.path().to_owned()).map_err(io::Error::other)?;
+    let store = PluginProgramStore::recover(
+        directory.path().to_owned(),
+        directory.path().to_owned(),
+        std::sync::Arc::new(crate::runner::extensions::ByPass),
+    )
+    .map_err(io::Error::other)?;
     Ok((directory, store))
 }
 
@@ -559,7 +563,6 @@ fn issues(resolution: &RuntimeResolution) -> io::Result<Value> {
 #[test]
 fn recovered_foreign_material_stays_queryable_while_old_and_unrelated_plans_survive()
 -> io::Result<()> {
-    use crate::runner::plugin::package::stage_plugin_program_package;
     use crate::runner::plugin::package::tests::package_with_platforms;
     use std::os::unix::fs::PermissionsExt as _;
     let (directory, mut store) = empty_store()?;
@@ -572,16 +575,20 @@ fn recovered_foreign_material_stays_queryable_while_old_and_unrelated_plans_surv
     let foreign_program = program("com.example.foreign", "source-and-sink");
     let platforms = json!([crate::runner::plugin::package::tests::foreign_platform()]);
     let bytes = package_with_platforms(&package(&foreign_program)?, &platforms)?;
-    let staged = stage_plugin_program_package(Cursor::new(bytes), directory.path())
-        .map_err(io::Error::other)?;
-    let manifest_before = fs::read(staged.path().join("manifest.json"))?;
     let namespace = directory.path().join("com.example.foreign");
     fs::create_dir(&namespace)?;
     fs::set_permissions(&namespace, fs::Permissions::from_mode(0o700))?;
-    fs::rename(staged.path(), namespace.join("1.0.0"))?;
+    let saved = namespace
+        .join(".tenon-artifact-92521fc3cbd964bdc9f584a991b89fddaa5754ed1cc96d6d42445338669c1305");
+    fs::write(&saved, &bytes)?;
+    fs::set_permissions(&saved, fs::Permissions::from_mode(0o600))?;
     drop(store);
-    let mut recovered =
-        PluginProgramStore::recover(directory.path().to_owned()).map_err(io::Error::other)?;
+    let mut recovered = PluginProgramStore::recover(
+        directory.path().to_owned(),
+        directory.path().to_owned(),
+        std::sync::Arc::new(crate::runner::extensions::ByPass),
+    )
+    .map_err(io::Error::other)?;
     let RuntimeResolution::Ready(old_plan) = resolver.resolve(&original, &recovered) else {
         return Err(io::Error::other("Original revision did not resolve"));
     };
@@ -591,10 +598,7 @@ fn recovered_foreign_material_stays_queryable_while_old_and_unrelated_plans_surv
         .lookup(&name, &version)
         .ok_or_else(|| io::Error::other("Foreign material was deleted"))?;
     assert_eq!(serde_json::to_value(entry.platforms())?, platforms);
-    assert_eq!(
-        fs::read(entry.directory().join("manifest.json"))?,
-        manifest_before
-    );
+    assert_eq!(fs::read(&saved)?, bytes);
     let mut changed = dual_document();
     changed["pluginInstances"]["left"]["programName"] = json!("com.example.foreign");
     changed["pluginInstances"]["right"]["programName"] = json!("com.example.foreign");

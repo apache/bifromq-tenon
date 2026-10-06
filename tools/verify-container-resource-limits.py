@@ -86,7 +86,7 @@ def verify(image, fixtures, *, init, grant):
 
         wait_for(lambda: request("GET", "/documents")[0] == 200)
         status, _, body = request("POST", "/plugins", (fixtures / "plugin.tar.gz").read_bytes(),
-                                  {"Content-Type": "application/vnd.apache.tenon.plugin+tar+gzip"})
+                                  {"Content-Type": "application/octet-stream"})
         assert status == 201, (status, body)
         document = json.loads((fixtures / "document.json").read_text())
 

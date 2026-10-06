@@ -22,7 +22,7 @@
 //! The Program Store owns mutation ordering and the live reference index.
 //! This boundary synchronizes, renames, and inspects its private filesystem.
 
-use crate::identifiers::{ExactVersion, ProgramName};
+use crate::identifiers::ProgramName;
 use crate::runner::plugin::package::PluginPackageError;
 use crate::runner::plugin::platform::Platform;
 use crate::runner::private_filesystem::{
@@ -36,6 +36,14 @@ use std::path::{Path, PathBuf};
 
 /// Filesystem operations whose ordering defines Store recovery and publication.
 pub(super) trait PublicationFilesystem {
+    fn sync_file(&self, path: &Path) -> Result<(), PluginStoreError> {
+        fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|source| PluginStoreError::FilesystemOperationFailed {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
     /// Reads all children before recovery mutates the directory.
     ///
     /// # Errors
@@ -69,14 +77,7 @@ pub(super) trait PublicationFilesystem {
         })
     }
 
-    /// Makes every ordinary file and directory below `root` durable before publication.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PluginStoreError`] when the tree cannot be traversed or synchronized.
-    fn sync_package_tree(&self, root: &Path) -> Result<(), PluginStoreError>;
-
-    /// Atomically makes the staged tree visible at its final identity path.
+    /// Atomically moves the package file to its final path.
     ///
     /// # Errors
     ///
@@ -104,10 +105,6 @@ pub(super) trait PublicationFilesystem {
 pub(super) struct DurablePublicationFilesystem;
 
 impl PublicationFilesystem for DurablePublicationFilesystem {
-    fn sync_package_tree(&self, root: &Path) -> Result<(), PluginStoreError> {
-        sync_package_tree(root)
-    }
-
     fn rename(&self, source: &Path, target: &Path) -> Result<(), PluginStoreError> {
         fs::rename(source, target).map_err(|source| PluginStoreError::FilesystemOperationFailed {
             path: target.to_path_buf(),
@@ -123,6 +120,8 @@ impl PublicationFilesystem for DurablePublicationFilesystem {
 /// A stable failure from package validation, Store state, or private filesystem I/O.
 #[derive(Debug)]
 pub(crate) enum PluginStoreError {
+    /// The distribution did not grant package access.
+    PackageAccessRejected,
     /// The uploaded package failed the shared package boundary.
     PackageInvalid {
         /// The precise package failure.
@@ -136,7 +135,7 @@ pub(crate) enum PluginStoreError {
     ProgramInUse,
     /// A committed package no longer passes its complete package contract.
     InstalledPackageInvalid {
-        /// The committed program directory.
+        /// The package or runtime directory.
         path: PathBuf,
         /// The precise package failure.
         source: PluginPackageError,
@@ -167,6 +166,7 @@ impl PluginStoreError {
     #[must_use]
     pub(crate) const fn code(&self) -> &'static str {
         match self {
+            Self::PackageAccessRejected => "plugin_package_open_failed",
             Self::PackageInvalid { source } => source.code(),
             Self::PlatformMismatch { .. } => "plugin_platform_mismatch",
             Self::VersionConflict => "plugin_version_conflict",
@@ -184,6 +184,9 @@ impl PluginStoreError {
 impl fmt::Display for PluginStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::PackageAccessRejected => {
+                formatter.write_str("Plugin package access was rejected")
+            }
             Self::PackageInvalid { .. } => formatter.write_str("Plugin package is invalid"),
             Self::PlatformMismatch { platforms } => write!(
                 formatter,
@@ -228,6 +231,7 @@ impl fmt::Display for PluginStoreError {
 impl Error for PluginStoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::PackageAccessRejected => None,
             Self::PackageInvalid { source } | Self::InstalledPackageInvalid { source, .. } => {
                 Some(source)
             }
@@ -256,21 +260,6 @@ pub(super) fn parse_program_entry(entry: &DirEntry) -> Result<ProgramName, Plugi
         .map_err(|_| PluginStoreError::StoreIntegrityInvalid { path: entry.path() })
 }
 
-/// Validates one private directory entry and parses its name as an exact version.
-///
-/// # Errors
-///
-/// Returns [`PluginStoreError`] when the entry is unsafe or its name is not canonical.
-pub(super) fn parse_version_entry(entry: &DirEntry) -> Result<ExactVersion, PluginStoreError> {
-    validate_private_directory_entry(entry)?;
-    let version = entry
-        .file_name()
-        .into_string()
-        .map_err(|_| PluginStoreError::StoreIntegrityInvalid { path: entry.path() })?;
-    ExactVersion::try_from(version)
-        .map_err(|_| PluginStoreError::StoreIntegrityInvalid { path: entry.path() })
-}
-
 /// Accepts only an owner-private ordinary directory without following a link.
 ///
 /// # Errors
@@ -294,55 +283,6 @@ pub(super) fn validate_private_directory_entry(entry: &DirEntry) -> Result<(), P
     } else {
         Err(PluginStoreError::StoreIntegrityInvalid { path })
     }
-}
-
-/// Synchronizes every file, then every directory from leaves through `root`.
-///
-/// # Errors
-///
-/// Returns [`PluginStoreError`] when traversal, object validation, or synchronization fails.
-pub(super) fn sync_package_tree(root: &Path) -> Result<(), PluginStoreError> {
-    let mut pending = vec![root.to_path_buf()];
-    let mut directories = Vec::new();
-    while let Some(directory) = pending.pop() {
-        directories.push(directory.clone());
-        let entries = fs::read_dir(&directory).map_err(|source| {
-            PluginStoreError::FilesystemOperationFailed {
-                path: directory.clone(),
-                source,
-            }
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|source| PluginStoreError::FilesystemOperationFailed {
-                path: directory.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            let file_type = entry.file_type().map_err(|source| {
-                PluginStoreError::FilesystemOperationFailed {
-                    path: path.clone(),
-                    source,
-                }
-            })?;
-            if file_type.is_dir() {
-                pending.push(path);
-            } else if file_type.is_file() {
-                fs::File::open(&path)
-                    .and_then(|file| file.sync_all())
-                    .map_err(|source| PluginStoreError::FilesystemOperationFailed {
-                        path,
-                        source,
-                    })?;
-            } else {
-                return Err(PluginStoreError::StoreIntegrityInvalid { path });
-            }
-        }
-    }
-    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    for directory in directories {
-        sync_directory(&directory)?;
-    }
-    Ok(())
 }
 
 /// Synchronizes one directory entry set to stable storage.

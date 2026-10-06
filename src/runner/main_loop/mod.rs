@@ -70,13 +70,19 @@ impl RunnerMainLoop {
     ) -> Result<RunnerShutdownReport, RunnerMainLoopFailure> {
         tokio::pin!(shutdown);
         let primary_failure = loop {
+            let (check, policy_changed, expiry) = self.execution.split();
             tokio::select! {
             biased;
             result = &mut shutdown => {
                 break result.err().map(RunnerMainLoopError::ShutdownSignal);
             }
-            () = self.execution.expiry.wait_for_expiry() => {
+            () = expiry.wait_for_expiry() => {
                 break Some(RunnerMainLoopError::ExecutionExpired);
+            }
+            changed = policy_changed => {
+                if changed && let Err(source) = self.management.check_execution(&check) {
+                    break Some(RunnerMainLoopError::ExecutionDenied(source));
+                }
             }
             source = self.control_server.wait() => {
                 break Some(RunnerMainLoopError::ControlServer(source));
@@ -84,7 +90,7 @@ impl RunnerMainLoop {
             source = self.http_server.wait() => {
                 break Some(RunnerMainLoopError::HttpServer(source));
             }
-            event = self.management.next_event(|scope| self.execution.check(scope)) => {
+            event = self.management.next_event(&check) => {
                 match event {
                     RunnerManagementEvent::CommitReady(commit) => {
                         if let Err(source) =

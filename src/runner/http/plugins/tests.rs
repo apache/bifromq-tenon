@@ -37,7 +37,7 @@ use axum::routing::get;
 use bytes::Bytes;
 use serde_json::{Value, json};
 use std::fs;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use tonic::codegen::Service as _;
 
 #[tokio::test(flavor = "current_thread")]
@@ -52,7 +52,7 @@ async fn upload_publishes_all_interfaces_with_exact_locations_and_idempotent_ret
         let package = valid_program_package(interface)?;
         for status in [StatusCode::CREATED, StatusCode::NO_CONTENT] {
             let request = Request::post("/plugins")
-                .header("Content-Type", PLUGIN_PACKAGE)
+                .header("Content-Type", "application/octet-stream")
                 .body(Body::from(package.clone()))
                 .map_err(io::Error::other)?;
             let response = exchange(&mut supervisor, &mut app, request).await?;
@@ -88,8 +88,12 @@ async fn upload_publishes_all_interfaces_with_exact_locations_and_idempotent_ret
     }
     supervisor.shutdown().await.map_err(io::Error::other)?;
     drop(supervisor);
-    let recovered = PluginProgramStore::recover(directory.path().join("plugins/programs"))
-        .map_err(io::Error::other)?;
+    let recovered = PluginProgramStore::recover(
+        directory.path().join("plugins/programs"),
+        directory.path().join("plugins/programs"),
+        std::sync::Arc::new(crate::runner::extensions::ByPass),
+    )
+    .map_err(io::Error::other)?;
     assert_eq!(recovered.programs().count(), 3);
     for (_, _, entry) in recovered.programs() {
         assert_eq!(entry.display_name(), "Example Plugin");
@@ -128,8 +132,8 @@ async fn normalized_retry_and_conflict_keep_the_committed_package() -> io::Resul
     }
     let root = directory.path().join("plugins/programs");
     assert_eq!(
-        fs::read(root.join("com.example.source/1.0.0/resources/data.bin"))?,
-        b"data"
+        fs::read(root.join("com.example.source/.tenon-artifact-92521fc3cbd964bdc9f584a991b89fddaa5754ed1cc96d6d42445338669c1305"))?,
+        valid_program_package(PluginInterface::Source)?
     );
     assert_eq!(fs::read_dir(root)?.count(), 1);
     supervisor.shutdown().await.map_err(io::Error::other)?;
@@ -165,6 +169,11 @@ async fn invalid_uploads_and_expansion_limits_do_not_poison_the_store() -> io::R
             StatusCode::PAYLOAD_TOO_LARGE,
             "plugin_package_too_large",
         ),
+        (
+            truncated_manifest_archive()?,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "plugin_package_invalid",
+        ),
     ] {
         let response = exchange(
             &mut supervisor,
@@ -191,14 +200,19 @@ async fn invalid_uploads_and_expansion_limits_do_not_poison_the_store() -> io::R
 async fn invalid_content_type_and_failed_body_publish_nothing() -> io::Result<()> {
     let package = valid_program_package(PluginInterface::Source)?;
     let (directory, mut supervisor, mut app) = program_http()?;
-    let request = Request::post("/plugins")
-        .header("Content-Type", "application/json")
-        .body(Body::empty())
-        .map_err(io::Error::other)?;
-    assert_eq!(
-        exchange(&mut supervisor, &mut app, request).await?.status(),
-        StatusCode::UNSUPPORTED_MEDIA_TYPE
-    );
+    for media_type in [
+        "application/json",
+        "application/vnd.apache.tenon.plugin+tar+gzip",
+    ] {
+        let request = Request::post("/plugins")
+            .header("Content-Type", media_type)
+            .body(Body::empty())
+            .map_err(io::Error::other)?;
+        assert_eq!(
+            exchange(&mut supervisor, &mut app, request).await?.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+    }
     let complete_archive = Bytes::from(package.clone());
     let body = Body::from_stream(tokio_stream::iter([
         Ok(complete_archive),
@@ -231,6 +245,19 @@ async fn invalid_content_type_and_failed_body_publish_nothing() -> io::Result<()
 }
 
 fn oversized_manifest_archive() -> io::Result<Vec<u8>> {
+    let size = 16 * 1024 * 1024 + 1;
+    let mut header = tar::Header::new_gnu();
+    header.set_path("manifest.json")?;
+    header.set_mode(0o500);
+    header.set_size(size);
+    header.set_cksum();
+    let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut archive = tar::Builder::new(gzip);
+    archive.append(&header, io::repeat(0).take(size))?;
+    archive.into_inner()?.finish()
+}
+
+fn truncated_manifest_archive() -> io::Result<Vec<u8>> {
     let mut header = tar::Header::new_gnu();
     header.set_path("manifest.json")?;
     header.set_mode(0o500);
@@ -243,7 +270,7 @@ fn oversized_manifest_archive() -> io::Result<Vec<u8>> {
 
 fn upload_request(body: Body) -> io::Result<Request<Body>> {
     Request::post("/plugins")
-        .header("Content-Type", PLUGIN_PACKAGE)
+        .header("Content-Type", "application/octet-stream")
         .body(body)
         .map_err(io::Error::other)
 }
@@ -281,14 +308,15 @@ fn program_http() -> io::Result<(tempfile::TempDir, RunnerManagementSupervisor, 
     let recovered = recover(
         &config,
         &layout,
-        &RunnerHooks::default().document_protection,
+        &RunnerHooks::default().artifact_protection,
+        &layout.pipeline_runtime_directory(),
     )
     .map_err(io::Error::other)?;
     let recovered = RunnerManagementSupervisor::recover(
         directory.path(),
         config.script_vm_limits(),
         recovered,
-        RunnerHooks::default().document_protection,
+        RunnerHooks::default().artifact_protection,
         None,
         |_| Ok(()),
     )?;

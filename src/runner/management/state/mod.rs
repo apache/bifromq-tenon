@@ -43,7 +43,7 @@ use crate::config::ScriptVmLimits;
 use crate::contracts::core::{PipelineStatusSnapshot, PluginInstanceState};
 use crate::identifiers::TenonDocumentId;
 use crate::runner::document_store::TenonDocumentEtag;
-use crate::runner::extensions::{DocumentProtection, ExecutionDenied, ExecutionScope};
+use crate::runner::extensions::{ArtifactProtection, ExecutionDenied, ExecutionScope};
 use crate::runner::pipeline::{
     PipelineLifecycleTarget, RuntimeResolution, RuntimeResolutionIssue, RuntimeResolver,
 };
@@ -76,7 +76,7 @@ pub(crate) enum PipelineDirective {
 /// The only owner of Runner management facts and business decisions.
 pub(crate) struct RunnerManagementState {
     state_directory: PathBuf,
-    document_protection: Arc<dyn DocumentProtection>,
+    artifact_protection: Arc<dyn ArtifactProtection>,
     script_vm_limits: ScriptVmLimits,
     available_cpu_count: NonZeroUsize,
     documents: HashMap<TenonDocumentId, RunnerDocumentState>,
@@ -89,19 +89,34 @@ pub(crate) struct RunnerManagementState {
 impl RunnerManagementState {
     // ===== Recovery and lifecycle intake =====
 
+    pub(crate) fn check_execution(
+        &self,
+        authorize: impl FnOnce(ExecutionScope<'_>) -> Result<(), ExecutionDenied>,
+    ) -> Result<(), ExecutionDenied> {
+        let documents = self
+            .documents
+            .values()
+            .filter(|state| state.is_accepted())
+            .map(|state| state.document.as_ref())
+            .collect::<Vec<_>>();
+        authorize(ExecutionScope {
+            documents: &documents,
+        })
+    }
+
     /// Restores the complete management state and derives initial targets.
     pub(crate) fn recover(
         state_directory: &Path,
         script_vm_limits: ScriptVmLimits,
         recovered: RecoveredRunnerState,
-        document_protection: Arc<dyn DocumentProtection>,
+        artifact_protection: Arc<dyn ArtifactProtection>,
         metrics: Option<&Meter>,
         mut authorize: impl FnMut(ExecutionScope<'_>) -> Result<(), ExecutionDenied>,
     ) -> io::Result<(Self, Box<[PipelineDirective]>)> {
         let (documents, programs) = recovered.into_parts();
         let mut owner = Self {
             state_directory: state_directory.to_path_buf(),
-            document_protection,
+            artifact_protection,
             script_vm_limits,
             available_cpu_count: process_resources::available_cpu_count()?,
             documents: HashMap::new(),
@@ -324,7 +339,7 @@ impl RunnerManagementState {
             outcome,
             response,
             document_store_directory: self.document_store_directory(),
-            protection: Arc::clone(&self.document_protection),
+            protection: Arc::clone(&self.artifact_protection),
         })
     }
 
@@ -831,7 +846,7 @@ fn plugin_instance_views(
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use crate::runner::extensions::Plaintext;
+    use crate::runner::extensions::ByPass;
     use crate::runner::plugin::store::test_support::empty_store;
 
     #[allow(
@@ -844,7 +859,7 @@ pub(crate) mod test_support {
     ) -> RunnerManagementState {
         RunnerManagementState {
             state_directory: state_directory.to_path_buf(),
-            document_protection: Arc::new(Plaintext),
+            artifact_protection: Arc::new(ByPass),
             script_vm_limits,
             available_cpu_count: process_resources::available_cpu_count()
                 .expect("Runner must determine available CPU count"),
@@ -916,14 +931,15 @@ mod tests {
         let recovered = recover(
             &config,
             &layout,
-            &RunnerHooks::default().document_protection,
+            &RunnerHooks::default().artifact_protection,
+            &layout.pipeline_runtime_directory(),
         )
         .map_err(io::Error::other)?;
         let (mut state, initial) = RunnerManagementState::recover(
             directory.path(),
             config.script_vm_limits(),
             recovered,
-            RunnerHooks::default().document_protection,
+            RunnerHooks::default().artifact_protection,
             None,
             |_| Ok(()),
         )?;

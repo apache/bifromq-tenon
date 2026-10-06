@@ -45,7 +45,7 @@ GET returns original `application/jsonc` bytes and a strong ETag. Preserve the c
 
 DELETE of an existing Document requires the exact `If-Match` and returns `204` once the saved Document has been removed. An absent Document is an idempotent `204`. A successful save means the original bytes are durable and admitted; application proceeds separately. After a lost response, read the Document and compare bytes/ETags before deciding whether to retry. Do not blindly overwrite concurrent edits.
 
-The API imposes no total Document or compressed upload byte limit. Deployment admission and resource controls must fit the environment. JSONC applies to Document/configuration input, while ordinary API responses are JSON. Schemas use `application/schema+json`; payload descriptors use `application/x-protobuf`.
+The API imposes no total Document byte limit. Received plugin packages have an 8 GiB limit. All formats use the same [directory limits](plugins.md#package-structure). Deployment admission and resource controls must fit the environment. JSONC applies to Document/configuration input, while ordinary API responses are JSON. Schemas use `application/schema+json`; payload descriptors use `application/x-protobuf`.
 
 ## Runtime status
 
@@ -61,7 +61,9 @@ An unready status includes `runtimeIssues`, such as missing Program, platform mi
 
 ## Packages and errors
 
-POST `/plugins` accepts raw gzip tar bytes with `Content-Type: application/vnd.apache.tenon.plugin+tar+gzip`. It does not accept multipart, Base64 or a download URL. Identity and interface come from `manifest.json`. A new installation returns `201`, an identical normalized file set returns `204`, and conflicting content for an installed identity returns `409`. See [package rules](plugins.md).
+POST `/plugins` accepts package bytes only with `Content-Type: application/octet-stream`. The package hook selects the format from the bytes. The default hook accepts `tar.gz`; a [custom hook](runner-extensions.md#plugin-packages) can accept other formats. Multipart, Base64, and download URLs are not accepted.
+
+Identity and interface come from `manifest.json`. A new installation returns `201`. An identical normalized file set returns `204`; conflicting content for an installed identity returns `409`. The Store keeps the received bytes and reconstructs runtime files at each Runner startup. See the [package rules](plugins.md).
 
 Uninstallation is blocked while persistent Documents or active execution still reference the Program. Removing a Document does not guarantee that its old processes have already exited. Query again after shutdown rather than forcing removal.
 

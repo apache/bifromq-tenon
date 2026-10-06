@@ -17,27 +17,31 @@
  * under the License.
  */
 
-//! Trusted distribution hooks for HTTP admission, execution, and Document storage.
+//! Trusted distribution hooks for HTTP admission, execution, and artifact protection.
 //!
 //! The Runner initializes these implementations once after configuration parsing.
 //! Only its serialized control loop calls the execution policy. Blocking Store
 //! jobs share the protection implementation, while the core retains all file,
 //! commit, process, cancellation, and shutdown ownership.
 
+mod tar_gz;
+
 use crate::tenon_document::VerifiedTenonDocument;
 use axum::http::{HeaderMap, HeaderValue, Method};
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
+use tar_gz::open_tar_gz;
+use tokio::sync::watch;
 
 /// The three implementations installed by one Runner initialization callback.
 pub struct RunnerHooks {
     pub(crate) execution_policy: Box<dyn ExecutionPolicy>,
-    pub(crate) document_protection: Arc<dyn DocumentProtection>,
+    pub(crate) artifact_protection: Arc<dyn ArtifactProtection>,
     pub(crate) http_authorization: Arc<dyn HttpApiAuthorization>,
 }
 
@@ -46,12 +50,12 @@ impl RunnerHooks {
     #[must_use]
     pub fn new(
         execution_policy: impl ExecutionPolicy + 'static,
-        document_protection: impl DocumentProtection + 'static,
+        artifact_protection: impl ArtifactProtection + 'static,
         http_authorization: impl HttpApiAuthorization + 'static,
     ) -> Self {
         Self {
             execution_policy: Box::new(execution_policy),
-            document_protection: Arc::new(document_protection),
+            artifact_protection: Arc::new(artifact_protection),
             http_authorization: Arc::new(http_authorization),
         }
     }
@@ -59,7 +63,7 @@ impl RunnerHooks {
 
 impl Default for RunnerHooks {
     fn default() -> Self {
-        Self::new(AllowAll, Plaintext, NoHttpAuth)
+        Self::new(AllowAll, ByPass, NoHttpAuth)
     }
 }
 
@@ -85,8 +89,23 @@ pub trait ExecutionPolicy {
     ///
     /// A denied candidate leaves the accepted desired state unchanged. Startup
     /// reports and skips it; an HTTP change returns the rejection to its caller.
+    /// Initial empty-set denial prevents recovery. Current-set denial after a
+    /// notification starts shutdown and keeps saved Documents.
     fn authorize(&self, scope: ExecutionScope<'_>) -> Result<ExecutionPermit, ExecutionDenied>;
+
+    /// Supplies optional notifications that the policy state has changed.
+    ///
+    /// The Runner calls this once, before the first authorization. Publish the
+    /// full policy state before you send a notification. The Runner can combine
+    /// notifications and evaluates the current state, including an empty Document set.
+    fn changes(&self) -> Option<PolicyChanges> {
+        None
+    }
 }
+
+/// A notification channel for changes to the current policy state.
+/// Values carry no decision, generation, or acknowledgement.
+pub type PolicyChanges = watch::Receiver<()>;
 
 /// Immutable facts borrowed only for one synchronous policy decision.
 #[derive(Debug)]
@@ -150,25 +169,81 @@ impl fmt::Display for ExecutionDenied {
 
 impl Error for ExecutionDenied {}
 
-/// Converts complete Document bytes without owning filesystem operations.
+/// Converts Document bytes and package envelopes without owning filesystem operations.
 ///
 /// Methods run in blocking Store work. The same implementation is shared by
 /// writes and startup recovery. Formats and key material remain implementation
 /// details; the core never guesses formats or falls back to plaintext.
-pub trait DocumentProtection: Send + Sync {
+/// Default Document methods write unchanged bytes. The package method decodes tar.gz.
+pub trait ArtifactProtection: Send + Sync {
     /// Writes the protected representation into the core-owned temporary file.
     ///
     /// # Errors
     ///
     /// An error leaves the formal Document unchanged, even after partial output.
-    fn protect(&self, source: &[u8], output: &mut dyn Write) -> io::Result<()>;
+    fn protect(&self, source: &[u8], output: &mut dyn Write) -> io::Result<()> {
+        output.write_all(source)
+    }
 
     /// Writes the recovered original bytes into the core-owned output buffer.
     ///
     /// # Errors
     ///
     /// An error aborts startup; partial output is discarded without parsing.
-    fn unprotect(&self, stored: &[u8], output: &mut dyn Write) -> io::Result<()>;
+    fn unprotect(&self, stored: &[u8], output: &mut dyn Write) -> io::Result<()> {
+        output.write_all(stored)
+    }
+
+    /// Decodes a package into files through the core-owned directory writer.
+    ///
+    /// This method runs during installation and recovery. Complete all format,
+    /// integrity, and access checks before returning success. The core validates
+    /// the directory contract and keeps the received input without changes.
+    /// The default decodes a standard tar.gz package with fixed format limits.
+    /// Custom hooks can call `ByPass.open_plugin_package` to reuse this decoder.
+    ///
+    /// # Errors
+    ///
+    /// Return an error if the package cannot be opened. Do not put secrets in
+    /// errors. The core discards partial output and does not try another format.
+    /// Use `InvalidData` or `UnexpectedEof` for invalid package data, and
+    /// `FileTooLarge` for a size limit. Other error kinds reject package access.
+    /// Failures from its input reader or directory writer remain core failures.
+    fn open_plugin_package(
+        &self,
+        source: &mut dyn Read,
+        output: &mut dyn PluginPackageOutput,
+    ) -> io::Result<()> {
+        open_tar_gz(source, output)
+    }
+}
+
+/// Receives decoded package files and directories.
+///
+/// The Runner supplies its implementation to [`ArtifactProtection::open_plugin_package`].
+/// Paths are relative to the package root. Files and directories use fixed
+/// owner-only permissions. The writer rejects duplicate paths, path conflicts,
+/// and output that exceeds the fixed limits. A failed call invalidates the
+/// whole output, even if the hook ignores its error.
+pub trait PluginPackageOutput {
+    /// Writes one ordinary file from its content stream to EOF.
+    ///
+    /// The writer creates missing parent directories. The file is not available
+    /// for execution until the hook and core validation have both succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid path, a duplicate, a size limit,
+    /// a failed content read, or a local file operation failure.
+    fn write_file(&mut self, path: &str, source: &mut dyn Read) -> io::Result<()>;
+
+    /// Creates one explicit directory and any missing parent directories.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid path, a duplicate explicit path,
+    /// a file conflict, an entry limit, or a local file operation failure.
+    fn create_dir(&mut self, path: &str) -> io::Result<()>;
 }
 
 /// Decides whether one HTTP request may enter its handler without reading its body.
@@ -236,16 +311,8 @@ impl ExecutionPolicy for AllowAll {
     }
 }
 
-/// The open-source protection implementation, preserving exact original bytes.
+/// Uses all default artifact methods without encryption or decryption.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Plaintext;
+pub struct ByPass;
 
-impl DocumentProtection for Plaintext {
-    fn protect(&self, source: &[u8], output: &mut dyn Write) -> io::Result<()> {
-        output.write_all(source)
-    }
-
-    fn unprotect(&self, stored: &[u8], output: &mut dyn Write) -> io::Result<()> {
-        output.write_all(stored)
-    }
-}
+impl ArtifactProtection for ByPass {}

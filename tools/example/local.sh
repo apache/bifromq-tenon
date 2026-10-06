@@ -211,7 +211,7 @@ fi
 printf 'Installing the generated and built-in Programs...\n'
 for package in "$bundle" "${builtin_bundles[@]}"; do
   curl --silent --show-error --fail -X POST "$api/plugins" \
-    -H 'Content-Type: application/vnd.apache.tenon.plugin+tar+gzip' \
+    -H 'Content-Type: application/octet-stream' \
     --data-binary "@$package" -o /dev/null
 done
 printf 'Saving the two Pipeline Documents...\n'

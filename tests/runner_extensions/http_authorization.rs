@@ -97,7 +97,7 @@ fn authorization_controls_real_http_and_tls_requests_before_upload() -> io::Resu
         let mut upload = transport.connect(address)?;
         write!(
             upload,
-            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/vnd.apache.tenon.plugin+tar+gzip\r\nContent-Length: 1000000\r\nExpect: 100-continue\r\n\r\n"
+            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\nContent-Length: 1000000\r\nExpect: 100-continue\r\n\r\n"
         )?;
         upload.flush()?;
         let mut bytes = Vec::new();
@@ -190,7 +190,7 @@ fn http_refusal_preserves_running_processes_and_does_not_refresh_execution_deadl
     )?;
     assert_eq!(rejected.status, 403);
     assert_eq!(fs::read(formal_file(root.path(), "runtime"))?, source);
-    assert_eq!(fs::read_to_string(&log)?.lines().count(), 1);
+    assert_eq!(fs::read_to_string(&log)?.lines().count(), 2);
     for pid in &processes {
         assert!(process::test_kill_process(*pid).is_ok());
     }

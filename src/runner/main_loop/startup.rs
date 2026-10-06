@@ -30,13 +30,13 @@ use crate::metrics::MetricsRuntime;
 use crate::runner::diagnostics::RunnerDiagnostics;
 use crate::runner::executable::CapturedRunnerExecutable;
 use crate::runner::execution::RunnerExecution;
-use crate::runner::extensions::RunnerHooks;
+use crate::runner::extensions::{ExecutionScope, RunnerHooks};
 use crate::runner::http::tls::TlsServerConfig;
 use crate::runner::http::{RunnerHttpServer, RunnerHttpServerError};
 use crate::runner::management::RunnerManagementSupervisor;
 use crate::runner::metrics::RunnerMetrics;
 use crate::runner::process_resources;
-use crate::runner::recovery::RecoveredRunnerState;
+use crate::runner::recovery::recover;
 use crate::runner::runtime_resources::{
     RunnerRuntimeCleanup, remove_stale_runtime_directory, stale_runner_directories,
 };
@@ -55,7 +55,6 @@ impl RunnerMainLoop {
         config: RunnerConfig,
         resources: Arc<RunnerResources>,
         state_layout: RunnerStateLayout,
-        recovered: RecoveredRunnerState,
         executable_image: CapturedRunnerExecutable,
         tls: Option<TlsServerConfig>,
         hooks: RunnerHooks,
@@ -63,21 +62,15 @@ impl RunnerMainLoop {
     ) -> Result<Self, RunnerMainLoopFailure> {
         let meter = metrics.meter();
         let metrics = RunnerMetrics::new(metrics, config.metrics().timeout());
-        let execution = RunnerExecution::new(hooks.execution_policy);
+        let mut execution = RunnerExecution::new(hooks.execution_policy);
+        execution
+            .check(ExecutionScope { documents: &[] })
+            .map_err(RunnerMainLoopError::ExecutionDenied)?;
         let document_verifier = config.tenon_document_verifier().map_err(|source| {
             RunnerMainLoopFailure::from(RunnerMainLoopError::ManagementInitialization(source))
         })?;
 
         let pipeline_runtime_directory = state_layout.pipeline_runtime_directory();
-        let recovered_management = RunnerManagementSupervisor::recover(
-            state_layout.state_directory(),
-            config.script_vm_limits(),
-            recovered,
-            hooks.document_protection,
-            Some(&meter),
-            |scope| execution.check(scope),
-        )
-        .map_err(RunnerMainLoopError::CpuObservation)?;
         resources.recover_stale_groups().await.map_err(|source| {
             RunnerMainLoopFailure::from(RunnerMainLoopError::ProcessResources(source))
         })?;
@@ -87,6 +80,52 @@ impl RunnerMainLoop {
                 .map_err(|source| {
                     RunnerMainLoopFailure::from(RunnerMainLoopError::RuntimeResources(source))
                 })?;
+        let prepared: Result<_, RunnerMainLoopError> = async {
+            let recovered = recover(
+                &config,
+                &state_layout,
+                &hooks.artifact_protection,
+                runtime_resources.directory(),
+            )
+            .map_err(RunnerMainLoopError::Recovery)?;
+            let recovered_management = RunnerManagementSupervisor::recover(
+                state_layout.state_directory(),
+                config.script_vm_limits(),
+                recovered,
+                hooks.artifact_protection,
+                Some(&meter),
+                |scope| execution.check(scope),
+            )
+            .map_err(RunnerMainLoopError::CpuObservation)?;
+            // Process notifications received during recovery before any Pipeline starts.
+            let (check, policy_changed, _) = execution.split();
+            let policy_result = tokio::select! {
+                biased;
+                changed = policy_changed => {
+                    if changed {
+                        recovered_management.check_execution(check)
+                    } else {
+                        Ok(())
+                    }
+                }
+                () = std::future::ready(()) => Ok(()),
+            };
+            policy_result.map_err(RunnerMainLoopError::ExecutionDenied)?;
+            Ok(recovered_management)
+        }
+        .await;
+        let recovered_management = match prepared {
+            Ok(management) => management,
+            Err(source) => {
+                let cleanup = runtime_resources
+                    .cleanup(RunnerRuntimeCleanup::Remove)
+                    .err()
+                    .map(RunnerMainLoopError::RuntimeResources)
+                    .into_iter()
+                    .collect();
+                return Err(combine_failures(source, cleanup).into());
+            }
+        };
         let diagnostics = RunnerDiagnostics::new();
         let control_server = match RunnerControlServer::start(
             runtime_resources.directory(),
@@ -124,7 +163,7 @@ impl RunnerMainLoop {
                 .pipeline_launcher()
                 .with_metrics(Some(&meter)),
             initial_pipeline_directives,
-            execution.expiry.clone(),
+            execution.expiry(),
         );
         let http_server = match RunnerHttpServer::start(
             config.http_listen_address(),

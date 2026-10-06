@@ -166,7 +166,7 @@ async fn program_store_failure_rejects_queued_work_in_running_and_draining_modes
         let release = hold_mutation_before_filesystem_work(&mut supervisor, job);
         let target = directory
             .path()
-            .join("plugins/programs/com.example.source/1.0.0");
+            .join("plugins/programs/com.example.source/.tenon-artifact-92521fc3cbd964bdc9f584a991b89fddaa5754ed1cc96d6d42445338669c1305");
         fs::rename(&target, directory.path().join("externally-moved-program"))?;
 
         let (response, queued_mutation) = oneshot::channel();
@@ -249,8 +249,8 @@ async fn program_store_failure_rejects_queued_work_in_running_and_draining_modes
         assert!(
             directory
                 .path()
-                .join("plugins/programs/com.example.sink/1.0.0")
-                .is_dir()
+                .join("plugins/programs/com.example.sink/.tenon-artifact-92521fc3cbd964bdc9f584a991b89fddaa5754ed1cc96d6d42445338669c1305")
+                .is_file()
         );
     }
     Ok(())
@@ -273,7 +273,7 @@ async fn shutdown_propagates_started_program_failure_and_joins_other_work() -> i
     fs::rename(
         directory
             .path()
-            .join("plugins/programs/com.example.source/1.0.0"),
+            .join("plugins/programs/com.example.source/.tenon-artifact-92521fc3cbd964bdc9f584a991b89fddaa5754ed1cc96d6d42445338669c1305"),
         directory.path().join("externally-moved-program"),
     )?;
     let (response, query) = oneshot::channel();
@@ -336,8 +336,12 @@ pub(super) fn program_supervisor(
 ) -> io::Result<(RunnerManagementSupervisor, RunnerManagementClient)> {
     let layout = prepare_runner_state_directory(directory).map_err(io::Error::other)?;
     {
-        let mut programs = PluginProgramStore::recover(layout.plugin_program_store_directory())
-            .map_err(io::Error::other)?;
+        let mut programs = PluginProgramStore::recover(
+            layout.plugin_program_store_directory(),
+            layout.plugin_program_store_directory(),
+            std::sync::Arc::new(crate::runner::extensions::ByPass),
+        )
+        .map_err(io::Error::other)?;
         for interface in [PluginInterface::Source, PluginInterface::Sink] {
             programs
                 .install(Cursor::new(valid_program_package(interface)?))
@@ -348,14 +352,15 @@ pub(super) fn program_supervisor(
     let recovered = recover(
         &config,
         &layout,
-        &RunnerHooks::default().document_protection,
+        &RunnerHooks::default().artifact_protection,
+        &layout.pipeline_runtime_directory(),
     )
     .map_err(io::Error::other)?;
     let (state, directives) = RunnerManagementState::recover(
         directory,
         config.script_vm_limits(),
         recovered,
-        RunnerHooks::default().document_protection,
+        RunnerHooks::default().artifact_protection,
         None,
         |_| Ok(()),
     )?;
