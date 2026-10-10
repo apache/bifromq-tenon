@@ -52,7 +52,12 @@ pub(in crate::runner) struct TargetFixture {
 
 impl TargetFixture {
     pub(in crate::runner) fn new(directory: &Path, config: &RunnerConfig) -> io::Result<Self> {
-        let store = PluginProgramStore::recover(directory.to_owned()).map_err(io::Error::other)?;
+        let store = PluginProgramStore::recover(
+            directory.to_owned(),
+            directory.to_owned(),
+            std::sync::Arc::new(crate::runner::extensions::ByPass),
+        )
+        .map_err(io::Error::other)?;
         let limits = config.script_vm_limits();
         let mut fixture = Self {
             store,
@@ -135,8 +140,12 @@ pub(super) struct RevisionFixture {
 impl RevisionFixture {
     pub(super) fn new(programs: &[&str]) -> io::Result<Self> {
         let directory = tempfile::tempdir()?;
-        let mut store =
-            PluginProgramStore::recover(directory.path().to_owned()).map_err(io::Error::other)?;
+        let mut store = PluginProgramStore::recover(
+            directory.path().to_owned(),
+            directory.path().to_owned(),
+            std::sync::Arc::new(crate::runner::extensions::ByPass),
+        )
+        .map_err(io::Error::other)?;
         let descriptor = valid_program_descriptor(PluginInterface::SourceAndSink)?;
         for name in programs {
             let manifest = json!({"programName": name, "exactVersion": "1.0.0", "interface": "source-and-sink", "platforms": [crate::runner::plugin::platform::Platform::CURRENT], "displayName": "Example Plugin", "description": "Read and write example records.", "command": ["./bin/start"]});

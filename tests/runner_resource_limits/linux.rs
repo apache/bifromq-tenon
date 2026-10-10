@@ -156,10 +156,8 @@ fn quote(value: &str) -> String {
 }
 
 fn install_load(state: &Path, mode: &str, markers: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    install_program(state, PluginInterface::SourceAndSink)?;
-    let directory = state.join("plugins/programs/com.example.gateway/1.0.0");
-    let mut manifest: Value = serde_json::from_slice(&fs::read(directory.join("manifest.json"))?)?;
+    let mut files = plugin_fixture::program_files(PluginInterface::SourceAndSink, None)?;
+    let mut manifest: Value = serde_json::from_slice(&files["manifest.json"])?;
     let control = plugin_fixture::controlled_program_command(PluginInterface::SourceAndSink)?
         .iter()
         .map(|arg| quote(arg))
@@ -179,24 +177,15 @@ fn install_load(state: &Path, mode: &str, markers: &Path) -> io::Result<()> {
         quote(&markers.to_string_lossy()),
         quote(&child_command)
     );
-    let script_path = directory.join("resource-plugin.sh");
-    fs::write(&script_path, script)?;
-    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o500))?;
+    files.insert("resource-plugin.sh".into(), script.into_bytes());
     manifest["command"] = json!(["/bin/sh", "./resource-plugin.sh"]);
-    // Installation is a fixture setup before the Runner establishes its Store.
-    fs::set_permissions(
-        directory.join("manifest.json"),
-        fs::Permissions::from_mode(0o600),
-    )?;
-    fs::write(
-        directory.join("manifest.json"),
-        serde_json::to_vec(&manifest)?,
-    )?;
-    fs::set_permissions(
-        directory.join("manifest.json"),
-        fs::Permissions::from_mode(0o500),
-    )?;
-    Ok(())
+    files.insert("manifest.json".into(), serde_json::to_vec(&manifest)?);
+    plugin_fixture::write_package(
+        state,
+        "com.example.gateway",
+        "1.0.0",
+        &plugin_fixture::archive(files)?,
+    )
 }
 
 #[test]

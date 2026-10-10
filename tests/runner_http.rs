@@ -51,28 +51,20 @@ fn unified_document_reaches_real_pipeline_and_keeps_applied_when_latest_is_unrea
     ] {
         let directory = tempfile::tempdir()?;
         install_program(directory.path(), PluginInterface::SourceAndSink)?;
-        let foreign_manifest = if expected_issue == "plugin_platform_mismatch" {
-            let namespace = directory
-                .path()
-                .join("plugins/programs/com.example.gateway");
-            let foreign = namespace.join("2.0.0");
-            fs::create_dir(&foreign)?;
-            fs::set_permissions(&foreign, fs::Permissions::from_mode(0o700))?;
-            for entry in fs::read_dir(namespace.join("1.0.0"))? {
-                let entry = entry?;
-                let mut bytes = fs::read(entry.path())?;
-                if entry.file_name() == "manifest.json" {
-                    let mut manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
-                    manifest["exactVersion"] = serde_json::json!("2.0.0");
-                    manifest["platforms"] =
-                        serde_json::json!([plugin_platform::foreign_platform()]);
-                    bytes = serde_json::to_vec(&manifest)?;
-                }
-                let target = foreign.join(entry.file_name());
-                fs::write(&target, bytes)?;
-                fs::set_permissions(target, fs::Permissions::from_mode(0o500))?;
-            }
-            Some(fs::read(foreign.join("manifest.json"))?)
+        let foreign_package = if expected_issue == "plugin_platform_mismatch" {
+            let mut files = plugin_fixture::program_files(PluginInterface::SourceAndSink, None)?;
+            let mut manifest: serde_json::Value = serde_json::from_slice(&files["manifest.json"])?;
+            manifest["exactVersion"] = serde_json::json!("2.0.0");
+            manifest["platforms"] = serde_json::json!([plugin_platform::foreign_platform()]);
+            files.insert("manifest.json".into(), serde_json::to_vec(&manifest)?);
+            let bytes = plugin_fixture::archive(files)?;
+            plugin_fixture::write_package(
+                directory.path(),
+                "com.example.gateway",
+                "2.0.0",
+                &bytes,
+            )?;
+            Some(bytes)
         } else {
             None
         };
@@ -154,7 +146,7 @@ fn unified_document_reaches_real_pipeline_and_keeps_applied_when_latest_is_unrea
         assert_eq!(latest["pluginInstances"][0]["exactVersion"], "1.0.0");
         assert_eq!(latest["runtimeIssues"][0]["code"], expected_issue);
         assert_summary(&latest)?;
-        if let Some(manifest_bytes) = foreign_manifest {
+        if let Some(package_bytes) = foreign_package {
             let summary = request(
                 address,
                 "GET",
@@ -168,12 +160,12 @@ fn unified_document_reaches_real_pipeline_and_keeps_applied_when_latest_is_unrea
                 serde_json::json!([plugin_platform::foreign_platform()])
             );
             assert_eq!(
-                fs::read(
-                    directory
-                        .path()
-                        .join("plugins/programs/com.example.gateway/2.0.0/manifest.json")
-                )?,
-                manifest_bytes
+                fs::read(plugin_fixture::stored_package_path(
+                    directory.path(),
+                    "com.example.gateway",
+                    "2.0.0"
+                ))?,
+                package_bytes
             );
             let in_use = request(
                 address,
@@ -487,9 +479,7 @@ fn unified_program_delete_rejects_invalid_paths_without_touching_the_store() -> 
     )?;
     assert_eq!(entry.status, 200, "{}", entry.body_text());
     assert!(
-        directory
-            .path()
-            .join("plugins/programs/com.example.modbus/1.0.0/manifest.json")
+        plugin_fixture::stored_package_path(directory.path(), "com.example.modbus", "1.0.0")
             .is_file()
     );
     runner.terminate()?;
@@ -500,13 +490,8 @@ fn unified_program_delete_rejects_invalid_paths_without_touching_the_store() -> 
 fn unified_program_queries_only_return_usable_metadata_summaries() -> io::Result<()> {
     let directory = tempfile::tempdir()?;
     install_program(directory.path(), PluginInterface::Source)?;
-    install_program(directory.path(), PluginInterface::Sink)?;
     install_program(directory.path(), PluginInterface::SourceAndSink)?;
     let program_root = directory.path().join("plugins/programs");
-    let invalid = program_root.join("com.example.kafka/1.0.0/manifest.json");
-    fs::set_permissions(&invalid, fs::Permissions::from_mode(0o700))?;
-    fs::write(&invalid, b"{}")?;
-    fs::set_permissions(&invalid, fs::Permissions::from_mode(0o500))?;
     let broken_namespace = program_root.join("com.example.broken");
     fs::write(&broken_namespace, b"not a namespace")?;
     let address = available_address()?;
@@ -558,7 +543,6 @@ fn unified_program_queries_only_return_usable_metadata_summaries() -> io::Result
             assert_eq!(missing.json()["error"]["code"], "plugin_not_found");
         }
     }
-    assert!(!program_root.join("com.example.kafka/1.0.0").exists());
     assert!(!broken_namespace.exists());
 
     runner.terminate()?;
@@ -856,10 +840,7 @@ fn document_plugin_and_reconcile_surface_is_one_consistent_boundary() -> io::Res
             address,
             "POST",
             "/plugins",
-            &[(
-                "Content-Type",
-                "application/vnd.apache.tenon.plugin+tar+gzip",
-            )],
+            &[("Content-Type", "application/octet-stream")],
             &package,
         )?;
         assert_eq!(installed.status, 201, "{}", installed.body_text());
@@ -867,10 +848,7 @@ fn document_plugin_and_reconcile_surface_is_one_consistent_boundary() -> io::Res
             address,
             "POST",
             "/plugins",
-            &[(
-                "Content-Type",
-                "application/vnd.apache.tenon.plugin+tar+gzip",
-            )],
+            &[("Content-Type", "application/octet-stream")],
             &package,
         )?;
         assert_eq!(unchanged.status, 204, "{}", unchanged.body_text());
@@ -916,10 +894,7 @@ fn document_plugin_and_reconcile_surface_is_one_consistent_boundary() -> io::Res
         address,
         "POST",
         "/plugins",
-        &[(
-            "Content-Type",
-            "application/vnd.apache.tenon.plugin+tar+gzip",
-        )],
+        &[("Content-Type", "application/octet-stream")],
         &conflicting_package,
     )?;
     assert_eq!(conflict.status, 409, "{}", conflict.body_text());
@@ -937,9 +912,9 @@ fn document_plugin_and_reconcile_surface_is_one_consistent_boundary() -> io::Res
     let schema_path = "/plugins/com.example.modbus/1.0.0/config-schema";
     let original_schema = request(address, "GET", schema_path, &[], &[])?;
     assert_eq!(original_schema.status, 200);
-    let private_schema = directory
-        .path()
-        .join("plugins/programs/com.example.modbus/1.0.0/config.schema.json");
+    let private_schema =
+        plugin_fixture::runtime_program_directory(directory.path(), "com.example.modbus", "1.0.0")?
+            .join("config.schema.json");
     fs::set_permissions(&private_schema, fs::Permissions::from_mode(0o700))?;
     fs::write(&private_schema, br#"{"type":"null"}"#)?;
     let schema_after_private_edit = request(address, "GET", schema_path, &[], &[])?;
@@ -1119,6 +1094,13 @@ fn openapi_document_is_served_and_covers_every_public_operation() -> io::Result<
                 "{transport:?}: missing path {path}"
             );
         }
+        let upload_types = document["paths"]["/plugins"]["post"]["requestBody"]["content"]
+            .as_object()
+            .ok_or_else(|| io::Error::other("Plugin upload content types are missing"))?;
+        assert_eq!(
+            upload_types.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["application/octet-stream"]
+        );
         let document_item = &document["paths"]["/documents/{id}"];
         assert!(
             document_item["get"].is_object(),
@@ -1241,10 +1223,7 @@ fn validation_and_restart_recovery_are_publicly_observable() -> io::Result<()> {
             address,
             "POST",
             "/plugins",
-            &[(
-                "Content-Type",
-                "application/vnd.apache.tenon.plugin+tar+gzip",
-            )],
+            &[("Content-Type", "application/octet-stream")],
             &package,
         )?;
         assert_eq!(installed.status, 201, "{}", installed.body_text());
@@ -1319,7 +1298,7 @@ fn graceful_shutdown_drains_a_started_plugin_upload() -> io::Result<()> {
         let mut stream = transport.connect(address)?;
         write!(
             stream,
-            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/vnd.apache.tenon.plugin+tar+gzip\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
             package.len()
         )?;
         stream.flush()?;
@@ -1360,7 +1339,7 @@ fn incomplete_plugin_bodies_never_publish_a_plugin() -> io::Result<()> {
         let mut large = transport.connect(address)?;
         write!(
             large,
-            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/vnd.apache.tenon.plugin+tar+gzip\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
             64_u64 * 1024 * 1024 + 1,
         )?;
         large.flush()?;
@@ -1372,7 +1351,7 @@ fn incomplete_plugin_bodies_never_publish_a_plugin() -> io::Result<()> {
         let mut truncated = transport.connect(address)?;
         write!(
             truncated,
-            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/vnd.apache.tenon.plugin+tar+gzip\r\nContent-Length: {}\r\n\r\n",
+            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
             package.len() + 16,
         )?;
         truncated.write_all(&package)?;
@@ -1386,9 +1365,7 @@ fn incomplete_plugin_bodies_never_publish_a_plugin() -> io::Result<()> {
 
         runner.terminate()?;
         assert!(
-            !directory
-                .path()
-                .join("plugins/programs/com.example.modbus/1.0.0")
+            !plugin_fixture::stored_package_path(directory.path(), "com.example.modbus", "1.0.0")
                 .exists()
         );
     }
@@ -1414,10 +1391,7 @@ fn plugin_staging_failure_stops_the_runner_without_publishing_a_program() -> io:
             address,
             "POST",
             "/plugins",
-            &[(
-                "Content-Type",
-                "application/vnd.apache.tenon.plugin+tar+gzip",
-            )],
+            &[("Content-Type", "application/octet-stream")],
             b"package",
         );
 
@@ -1527,17 +1501,14 @@ fn large_plugin_package_installs_with_content_length_and_chunked_transfer() -> i
             address,
             "POST",
             "/plugins",
-            &[(
-                "Content-Type",
-                "application/vnd.apache.tenon.plugin+tar+gzip",
-            )],
+            &[("Content-Type", "application/octet-stream")],
             &package,
         )?;
         assert_eq!(response.status, 201, "{}", response.body_text());
         let mut stream = transport.connect(address)?;
         write!(
             stream,
-            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/vnd.apache.tenon.plugin+tar+gzip\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
         )?;
         for chunk in package.chunks(64 * 1024) {
             write!(stream, "{:x}\r\n", chunk.len())?;

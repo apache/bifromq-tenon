@@ -59,7 +59,7 @@ Once the Runner is running, the essential API calls are:
 
 ```sh
 curl --fail -i -X POST http://127.0.0.1:18080/plugins \
-  -H 'Content-Type: application/vnd.apache.tenon.plugin+tar+gzip' \
+  -H 'Content-Type: application/octet-stream' \
   --data-binary @/absolute/path/to/hello-tenon.tar.gz
 curl --fail -i -X PUT http://127.0.0.1:18080/documents/hello \
   -H 'Content-Type: application/jsonc' -H 'If-None-Match: *' \

@@ -19,20 +19,22 @@
 
 //! Durable and in-memory ownership of current unified Plugin Programs.
 //!
-//! Recovery validates the prepared filesystem tree and removes unusable child
-//! entries before publishing the only runtime identity map. The map contains
-//! only immutable validated Entries; there is no saved failure or missing state.
+//! The Store keeps received packages and reconstructs temporary runtime files.
+//! Package access or validation failure stops recovery and keeps the saved input.
+//! The only runtime identity map contains immutable validated Entries.
+//! There is no saved failure or missing state.
 //! Runtime mutations are exclusive. Persistence or installed-layout failures
 //! must terminate the Runner; only the next startup may recover the disk.
 
 mod filesystem;
-mod upload;
+mod package_input;
+mod protected;
 
 pub(crate) use filesystem::PluginStoreError;
 
 use super::package::{PluginConfigSchema, PluginPackageError};
 use super::package::{
-    ValidatedPluginProgramMaterial, ValidatedPluginProgramSnapshot, stage_plugin_program_package,
+    ValidatedPluginProgramMaterial, ValidatedPluginProgramSnapshot,
     validate_plugin_program_directory,
 };
 use super::platform::Platform;
@@ -41,11 +43,13 @@ use crate::identifiers::{ExactVersion, PluginProgramIdentity, ProgramName};
 use crate::payload_contract::{
     PluginInterface, PluginProgramPayloadContract, PluginProgramPayloadContractProjection,
 };
+use crate::runner::extensions::ArtifactProtection;
 use crate::runner::private_filesystem::has_owner_only_directory_permission;
 use filesystem::{
-    DurablePublicationFilesystem, PublicationFilesystem, parse_program_entry, parse_version_entry,
+    DurablePublicationFilesystem, PublicationFilesystem, parse_program_entry,
     set_private_directory_permission,
 };
+use protected::{ORIGINAL_PREFIX, StoredOriginal, original_file_name, version_digest};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, Read};
@@ -64,25 +68,45 @@ pub(crate) enum PluginProgramInstallResult {
 const DELETION_TOMBSTONE_PREFIX: &str = ".tenon-plugin-delete-";
 
 /// The only owner of durable Program layout and the validated runtime index.
-#[derive(Debug)]
 pub(crate) struct PluginProgramStore {
     directory: PathBuf,
+    runtime_directory: PathBuf,
+    protection: Arc<dyn ArtifactProtection>,
     programs: HashMap<PluginProgramIdentity, Arc<PluginProgramEntry>>,
 }
 
+impl std::fmt::Debug for PluginProgramStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PluginProgramStore")
+            .field("directory", &self.directory)
+            .field("programs", &self.programs)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PluginProgramStore {
-    /// Validates Programs and removes unusable children from the prepared root.
+    /// Reconstructs runtime files from the saved packages in the prepared root.
     ///
-    /// An invalid exact version is deleted without affecting valid siblings.
-    /// An invalid or unreadable namespace is removed as a whole. Cleanup never
-    /// follows symbolic links or removes the fixed root.
+    /// Package access or validation failure stops recovery and keeps the saved input.
+    /// An invalid or unreadable namespace is removed as a whole. Cleanup removes
+    /// unsupported entries without following symbolic links or removing the fixed root.
     ///
     /// # Errors
     ///
-    /// Returns [`PluginStoreError`] when the root cannot be completely
-    /// enumerated or a required cleanup or directory sync fails.
-    pub(crate) fn recover(directory: PathBuf) -> Result<Self, PluginStoreError> {
-        Self::recover_with_filesystem(directory, &DurablePublicationFilesystem)
+    /// Returns [`PluginStoreError`] for a package failure, incomplete root
+    /// enumeration, or a required cleanup or directory sync failure.
+    pub(crate) fn recover(
+        directory: PathBuf,
+        runtime_directory: PathBuf,
+        protection: Arc<dyn ArtifactProtection>,
+    ) -> Result<Self, PluginStoreError> {
+        Self::recover_using(
+            directory,
+            runtime_directory,
+            protection,
+            &DurablePublicationFilesystem,
+        )
     }
 
     /// Installs and publishes one immutable Program in the same owner mutation.
@@ -141,12 +165,16 @@ impl PluginProgramStore {
             .map(|(identity, entry)| (identity.program_name(), identity.exact_version(), entry))
     }
 
-    fn recover_with_filesystem(
+    fn recover_using(
         directory: PathBuf,
+        runtime_directory: PathBuf,
+        protection: Arc<dyn ArtifactProtection>,
         filesystem: &impl PublicationFilesystem,
     ) -> Result<Self, PluginStoreError> {
         let mut store = Self {
             directory,
+            runtime_directory,
+            protection,
             programs: HashMap::new(),
         };
         // Collect each directory before deleting children, so a failed
@@ -166,20 +194,26 @@ impl PluginProgramStore {
             };
             for version in versions {
                 let target = version.path();
-                let recovered = parse_version_entry(&version).and_then(|exact_version| {
-                    let installed = load_installed(&target)?;
-                    validate_identity(&installed, &program_name, &exact_version, &target)?;
-                    Ok((exact_version, installed))
-                });
-                match recovered {
-                    Ok((exact_version, installed)) => {
-                        store.programs.insert(
-                            PluginProgramIdentity::from_parts(program_name.clone(), exact_version),
-                            Arc::new(program_entry(target, installed)),
-                        );
-                    }
-                    Err(issue) => discard_invalid_entry(&target, &path, &issue, filesystem)?,
+                if version
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(ORIGINAL_PREFIX))
+                {
+                    let (exact_version, entry) = store.load_original(&target, &program_name)?;
+                    store.programs.insert(
+                        PluginProgramIdentity::from_parts(program_name.clone(), exact_version),
+                        Arc::new(entry),
+                    );
+                    continue;
                 }
+                discard_invalid_entry(
+                    &target,
+                    &path,
+                    &PluginStoreError::StoreIntegrityInvalid {
+                        path: target.clone(),
+                    },
+                    filesystem,
+                )?;
             }
         }
         Ok(store)
@@ -190,19 +224,12 @@ impl PluginProgramStore {
         package: impl Read,
         publication: &impl PublicationFilesystem,
     ) -> Result<PluginProgramInstallResult, PluginStoreError> {
-        let package = upload::receive(package, &self.directory)?;
-        let staged =
-            stage_plugin_program_package(package, &self.directory).map_err(
-                |source| match source {
-                    PluginPackageError::FilesystemOperationFailed { source } => {
-                        PluginStoreError::FilesystemOperationFailed {
-                            path: self.directory.clone(),
-                            source,
-                        }
-                    }
-                    source => PluginStoreError::PackageInvalid { source },
-                },
-            )?;
+        let mut package = package_input::receive(package, &self.directory)?;
+        let staged = package_input::open(
+            package.as_file_mut(),
+            &self.runtime_directory,
+            self.protection.as_ref(),
+        )?;
         if !staged.platforms().contains(&Platform::CURRENT) {
             let platforms = staged.platforms().into();
             staged
@@ -217,7 +244,7 @@ impl PluginProgramStore {
         let identity =
             PluginProgramIdentity::from_parts(program_name.clone(), staged.exact_version().clone());
         let parent = self.directory.join(program_name.as_str());
-        let target = parent.join(staged.exact_version().as_str());
+        let target = parent.join(original_file_name(staged.exact_version()));
 
         let namespace_presence = inspect_program_namespace(&parent)?;
         if matches!(namespace_presence, ProgramNamespacePresence::Absent)
@@ -230,18 +257,22 @@ impl PluginProgramStore {
         }
 
         if let Some(entry) = self.programs.get(&identity) {
-            let existing = load_installed(&target)?;
+            entry.original.verify()?;
+            let target = &entry.directory;
+            let existing = load_installed(target)?;
             validate_identity(
                 &existing,
                 staged.program_name(),
                 staged.exact_version(),
-                &target,
+                target,
             )?;
             if !existing.matches_snapshot(&entry.manifest_bytes, &entry.file_digests) {
-                return Err(PluginStoreError::StoreIntegrityInvalid { path: target });
+                return Err(PluginStoreError::StoreIntegrityInvalid {
+                    path: target.clone(),
+                });
             }
             let identical = staged
-                .has_same_files_as(&existing, &target)
+                .has_same_files_as(&existing, target)
                 .map_err(|source| PluginStoreError::InstalledPackageInvalid {
                     path: target.clone(),
                     source,
@@ -260,11 +291,13 @@ impl PluginProgramStore {
 
         require_absent(&target, publication)?;
         self.prepare_program_directory(&parent, namespace_presence, publication)?;
-        publication.sync_package_tree(staged.path())?;
-        publication.rename(staged.path(), &target)?;
+        let original = StoredOriginal::from_file(target, package.as_file_mut())?;
+        publication.sync_file(package.path())?;
+        publication.rename(package.path(), &original.path)?;
         publication.sync_directory(&parent)?;
-
-        let entry = Arc::new(program_entry(target, staged.into_snapshot()));
+        let (directory, snapshot) = staged.into_runtime();
+        let entry = program_entry(directory, original, snapshot);
+        let entry = Arc::new(entry);
         self.programs.insert(identity.clone(), entry);
         Ok(PluginProgramInstallResult::Installed(identity))
     }
@@ -285,23 +318,14 @@ impl PluginProgramStore {
         }
 
         let parent = self.directory.join(program_name.as_str());
-        let target = parent.join(exact_version.as_str());
+        let target = entry.original.path.clone();
         if matches!(
             inspect_program_namespace(&parent)?,
             ProgramNamespacePresence::Absent
         ) {
             return Err(PluginStoreError::StoreIntegrityInvalid { path: parent });
         }
-        let metadata = publication.symlink_metadata(&target).map_err(|source| {
-            PluginStoreError::FilesystemOperationFailed {
-                path: target.clone(),
-                source,
-            }
-        })?;
-        if !metadata.is_dir() || !has_owner_only_directory_permission(&metadata) {
-            return Err(PluginStoreError::StoreIntegrityInvalid { path: target });
-        }
-
+        entry.original.verify()?;
         let tombstone = deletion_tombstone_path(&parent, exact_version);
         require_absent(&tombstone, publication)?;
         publication.rename(&target, &tombstone)?;
@@ -311,6 +335,9 @@ impl PluginProgramStore {
             removed.is_some(),
             "Program must remain owned until uninstall commits"
         );
+        if let Some(entry) = &removed {
+            publication.remove_entry(&entry.directory)?;
+        }
         publication.remove_entry(&tombstone)?;
         publication.sync_directory(&parent)?;
         Ok(PluginUninstallOutcome::Uninstalled)
@@ -349,6 +376,7 @@ pub(crate) enum PluginUninstallOutcome {
 /// One immutable validated Program shared by the Store and ready Plans.
 pub(crate) struct PluginProgramEntry {
     directory: PathBuf,
+    original: StoredOriginal,
     manifest_bytes: Box<[u8]>,
     display_name: String,
     description: String,
@@ -363,7 +391,7 @@ pub(crate) struct PluginProgramEntry {
 }
 
 impl PluginProgramEntry {
-    /// Returns the exact durable Program directory.
+    /// Returns the validated runtime directory for this Program.
     #[must_use]
     pub(crate) fn directory(&self) -> &Path {
         &self.directory
@@ -439,6 +467,7 @@ impl std::fmt::Debug for PluginProgramEntry {
 
 fn program_entry(
     directory: PathBuf,
+    original: StoredOriginal,
     snapshot: ValidatedPluginProgramSnapshot,
 ) -> PluginProgramEntry {
     let ValidatedPluginProgramSnapshot {
@@ -457,6 +486,7 @@ fn program_entry(
     } = validated.into_material();
     PluginProgramEntry {
         directory,
+        original,
         manifest_bytes,
         display_name,
         description,
@@ -472,7 +502,7 @@ fn program_entry(
 fn deletion_tombstone_path(parent: &Path, exact_version: &ExactVersion) -> PathBuf {
     parent.join(format!(
         "{DELETION_TOMBSTONE_PREFIX}{}",
-        exact_version.as_str()
+        version_digest(exact_version)
     ))
 }
 
@@ -573,6 +603,8 @@ pub(crate) mod test_support {
 
     pub(crate) fn empty_store(directory: PathBuf) -> PluginProgramStore {
         PluginProgramStore {
+            runtime_directory: directory.clone(),
+            protection: std::sync::Arc::new(crate::runner::extensions::ByPass),
             directory,
             programs: HashMap::new(),
         }

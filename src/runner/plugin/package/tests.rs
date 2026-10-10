@@ -161,13 +161,17 @@ fn current_payload_vectors_stage_one_shared_program_contract() -> io::Result<()>
         let descriptor = compile_descriptor(&vector.files, &vector.entry_files)?;
         let package = program_package(vector.interface, descriptor.clone(), valid_config_schema())?;
         let staging_parent = tempfile::tempdir()?;
-        let staged = stage_plugin_program_package(Cursor::new(package), staging_parent.path())
-            .map_err(|error| {
-                io::Error::other(format!(
-                    "valid payload vector {} was rejected: {error}",
-                    vector.name
-                ))
-            })?;
+        let staged = stage_plugin_program_package(
+            &crate::runner::extensions::ByPass,
+            Cursor::new(package),
+            staging_parent.path(),
+        )
+        .map_err(|error| {
+            io::Error::other(format!(
+                "valid payload vector {} was rejected: {error}",
+                vector.name
+            ))
+        })?;
 
         let (program_name, exact_version, interface, command) = manifest_fields(&staged);
         assert_eq!(interface, vector.interface);
@@ -314,8 +318,12 @@ fn fixed_contract_files_are_required_but_other_files_come_from_the_archive() -> 
 
     let package = program_package(PluginInterface::Source, descriptor, valid_config_schema())?;
     let staging_parent = tempfile::tempdir()?;
-    let staged = stage_plugin_program_package(Cursor::new(package), staging_parent.path())
-        .map_err(io::Error::other)?;
+    let staged = stage_plugin_program_package(
+        &crate::runner::extensions::ByPass,
+        Cursor::new(package),
+        staging_parent.path(),
+    )
+    .map_err(io::Error::other)?;
     assert_eq!(fs::read(staged.path().join("resources/data.bin"))?, b"data");
     Ok(())
 }
@@ -360,10 +368,18 @@ fn failed_validation_and_owner_drop_remove_the_staging_tree() -> io::Result<()> 
         source_descriptor()?,
         valid_config_schema(),
     )?;
-    assert!(stage_plugin_program_package(Cursor::new(invalid), staging_parent.path()).is_err());
+    assert!(
+        stage_plugin_program_package(
+            &crate::runner::extensions::ByPass,
+            Cursor::new(invalid),
+            staging_parent.path()
+        )
+        .is_err()
+    );
     assert!(staging_parent.path().read_dir()?.next().is_none());
 
     let staged = stage_plugin_program_package(
+        &crate::runner::extensions::ByPass,
         Cursor::new(program_package(
             PluginInterface::Source,
             source_descriptor()?,
@@ -380,9 +396,13 @@ fn failed_validation_and_owner_drop_remove_the_staging_tree() -> io::Result<()> 
 
 fn stage_error(package: Vec<u8>) -> io::Result<PluginPackageError> {
     let staging_parent = tempfile::tempdir()?;
-    stage_plugin_program_package(Cursor::new(package), staging_parent.path())
-        .err()
-        .ok_or_else(|| io::Error::other("invalid Plugin Program package was accepted"))
+    stage_plugin_program_package(
+        &crate::runner::extensions::ByPass,
+        Cursor::new(package),
+        staging_parent.path(),
+    )
+    .err()
+    .ok_or_else(|| io::Error::other("invalid Plugin Program package was accepted"))
 }
 
 #[cfg(unix)]
@@ -407,9 +427,13 @@ mod cleanup {
                 input: Cursor::new(package),
                 permission: &permission,
             };
-            let error = stage_plugin_program_package(input, directory.path())
-                .err()
-                .ok_or_else(|| io::Error::other("Invalid input was accepted"))?;
+            let error = stage_plugin_program_package(
+                &crate::runner::extensions::ByPass,
+                input,
+                directory.path(),
+            )
+            .err()
+            .ok_or_else(|| io::Error::other("Invalid input was accepted"))?;
             drop(permission);
             assert!(
                 matches!(error, PluginPackageError::FilesystemOperationFailed { source }
@@ -426,6 +450,7 @@ mod cleanup {
         }
         let directory = tempfile::tempdir()?;
         let staged = stage_plugin_program_package(
+            &crate::runner::extensions::ByPass,
             Cursor::new(valid_source_program_package()?),
             directory.path(),
         )

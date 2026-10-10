@@ -19,7 +19,6 @@
 
 use super::recover;
 use crate::config::RunnerConfig;
-use crate::identifiers::{ExactVersion, ProgramName};
 use crate::payload_contract::PluginInterface;
 use crate::pipeline::test_support::PipelineRevision;
 use crate::runner::document_store::TenonDocumentEtag;
@@ -63,7 +62,8 @@ fn startup_resolution_reflects_the_current_plugin_registry() -> io::Result<()> {
     let (documents, programs) = recover(
         &config,
         &state_layout,
-        &RunnerHooks::default().document_protection,
+        &RunnerHooks::default().artifact_protection,
+        &state_layout.pipeline_runtime_directory(),
     )
     .map_err(io::Error::other)?
     .into_parts();
@@ -111,7 +111,8 @@ fn startup_resolution_reflects_the_current_plugin_registry() -> io::Result<()> {
     let (documents, programs) = recover(
         &config,
         &state_layout,
-        &RunnerHooks::default().document_protection,
+        &RunnerHooks::default().artifact_protection,
+        &state_layout.pipeline_runtime_directory(),
     )
     .map_err(io::Error::other)?
     .into_parts();
@@ -149,8 +150,12 @@ fn startup_recovers_all_program_interfaces_in_one_store() -> io::Result<()> {
     install_plugin(state_directory.path(), PluginInterface::Sink)?;
     let state_layout =
         prepare_runner_state_directory(state_directory.path()).map_err(io::Error::other)?;
-    let mut store = PluginProgramStore::recover(state_layout.plugin_program_store_directory())
-        .map_err(io::Error::other)?;
+    let mut store = PluginProgramStore::recover(
+        state_layout.plugin_program_store_directory(),
+        state_layout.plugin_program_store_directory(),
+        std::sync::Arc::new(crate::runner::extensions::ByPass),
+    )
+    .map_err(io::Error::other)?;
     store
         .install(Cursor::new(valid_program_package(
             PluginInterface::SourceAndSink,
@@ -161,7 +166,8 @@ fn startup_recovers_all_program_interfaces_in_one_store() -> io::Result<()> {
     let (_documents, programs) = recover(
         &config,
         &state_layout,
-        &RunnerHooks::default().document_protection,
+        &RunnerHooks::default().artifact_protection,
+        &state_layout.pipeline_runtime_directory(),
     )
     .map_err(io::Error::other)?
     .into_parts();
@@ -171,12 +177,16 @@ fn startup_recovers_all_program_interfaces_in_one_store() -> io::Result<()> {
 }
 
 #[test]
-fn startup_deletes_a_corrupt_unified_program_without_deleting_documents() -> io::Result<()> {
+fn startup_preserves_a_corrupt_original_package_and_documents() -> io::Result<()> {
     let state_directory = tempfile::tempdir()?;
     let state_layout =
         prepare_runner_state_directory(state_directory.path()).map_err(io::Error::other)?;
-    let mut store = PluginProgramStore::recover(state_layout.plugin_program_store_directory())
-        .map_err(io::Error::other)?;
+    let mut store = PluginProgramStore::recover(
+        state_layout.plugin_program_store_directory(),
+        state_layout.pipeline_runtime_directory(),
+        std::sync::Arc::new(crate::runner::extensions::ByPass),
+    )
+    .map_err(io::Error::other)?;
     store
         .install(Cursor::new(valid_source_program_package()?))
         .map_err(io::Error::other)?;
@@ -186,30 +196,31 @@ fn startup_deletes_a_corrupt_unified_program_without_deleting_documents() -> io:
         "keep-document",
         document("keep-document"),
     )?;
-    let manifest = state_directory
+    let package = state_directory
         .path()
-        .join("plugins/programs/com.example.source/1.0.0/manifest.json");
-    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o700))?;
-    fs::write(&manifest, b"{}")?;
-    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o500))?;
+        .join("plugins/programs/com.example.source/.tenon-artifact-92521fc3cbd964bdc9f584a991b89fddaa5754ed1cc96d6d42445338669c1305");
+    fs::write(&package, b"invalid archive")?;
     let config = load_config(state_directory.path())?;
-
-    let (documents, programs) = recover(
+    let error = recover(
         &config,
         &state_layout,
-        &RunnerHooks::default().document_protection,
+        &RunnerHooks::default().artifact_protection,
+        &state_layout.pipeline_runtime_directory(),
     )
-    .map_err(io::Error::other)?
-    .into_parts();
-    let program_name =
-        ProgramName::try_from(String::from("com.example.source")).map_err(io::Error::other)?;
-    let exact_version = ExactVersion::try_from(String::from("1.0.0")).map_err(io::Error::other)?;
-    assert!(programs.lookup(&program_name, &exact_version).is_none());
-    assert!(!manifest.exists());
-    assert_eq!(documents.len(), 1);
-    let (source, document) = documents.into_vec().remove(0).into_parts();
-    assert_eq!(document.id().as_str(), "keep-document");
-    assert!(!source.is_empty());
+    .err()
+    .ok_or_else(|| io::Error::other("Corrupt package did not stop recovery"))?;
+    assert_eq!(error.code(), "plugin_store_integrity_invalid");
+    assert_eq!(fs::read(&package)?, b"invalid archive");
+    assert_eq!(
+        fs::read(
+            fs::read_dir(state_layout.tenon_document_store_directory())?
+                .next()
+                .transpose()?
+                .ok_or_else(|| io::Error::other("Saved Document is missing"))?
+                .path()
+        )?,
+        document("keep-document").as_bytes()
+    );
     Ok(())
 }
 
@@ -228,7 +239,8 @@ fn startup_rejects_a_committed_file_whose_name_does_not_match_its_document_id() 
     let error = recover(
         &config,
         &state_layout,
-        &RunnerHooks::default().document_protection,
+        &RunnerHooks::default().artifact_protection,
+        &state_layout.pipeline_runtime_directory(),
     )
     .err()
     .ok_or_else(|| io::Error::other("mismatched committed identity was accepted"))?;
@@ -243,18 +255,11 @@ async fn empty_runner_starts_and_stops_its_private_control_service() -> io::Resu
     let config = load_config(state_directory.path())?;
     let state_layout =
         prepare_runner_state_directory(state_directory.path()).map_err(io::Error::other)?;
-    let recovered = recover(
-        &config,
-        &state_layout,
-        &RunnerHooks::default().document_protection,
-    )
-    .map_err(io::Error::other)?;
 
     RunnerMainLoop::start(
         config,
         crate::runner::process_resources::test_support::unavailable(),
         state_layout,
-        recovered,
         CapturedRunnerExecutable::capture_current()?,
         None,
         RunnerHooks::default(),
@@ -285,19 +290,12 @@ async fn failed_http_start_cleans_already_prepared_runtime_owners() -> io::Resul
     let config = load_config(state_directory.path())?;
     let state_layout =
         prepare_runner_state_directory(state_directory.path()).map_err(io::Error::other)?;
-    let recovered = recover(
-        &config,
-        &state_layout,
-        &RunnerHooks::default().document_protection,
-    )
-    .map_err(io::Error::other)?;
     let _occupied = TcpListener::bind(config.http_listen_address())?;
 
     let error = RunnerMainLoop::start(
         config,
         crate::runner::process_resources::test_support::unavailable(),
         state_layout,
-        recovered,
         CapturedRunnerExecutable::capture_current()?,
         None,
         RunnerHooks::default(),
@@ -327,12 +325,6 @@ async fn shutdown_ready_before_lifecycle_poll_prevents_pipeline_spawn() -> io::R
     let config = load_config(state_directory.path())?;
     let state_layout =
         prepare_runner_state_directory(state_directory.path()).map_err(io::Error::other)?;
-    let recovered = recover(
-        &config,
-        &state_layout,
-        &RunnerHooks::default().document_protection,
-    )
-    .map_err(io::Error::other)?;
     let marker = state_directory.path().join("pipeline-spawned");
     let executable = state_directory.path().join("pipeline.sh");
     fs::write(
@@ -345,7 +337,6 @@ async fn shutdown_ready_before_lifecycle_poll_prevents_pipeline_spawn() -> io::R
         config,
         crate::runner::process_resources::test_support::unavailable(),
         state_layout,
-        recovered,
         CapturedRunnerExecutable::from_file(File::open(&executable)?)?,
         None,
         RunnerHooks::default(),
@@ -374,12 +365,6 @@ async fn shutdown_period_plugin_commit_does_not_start_a_new_pipeline() -> io::Re
     let http_address = config.http_listen_address();
     let state_layout =
         prepare_runner_state_directory(state_directory.path()).map_err(io::Error::other)?;
-    let recovered = recover(
-        &config,
-        &state_layout,
-        &RunnerHooks::default().document_protection,
-    )
-    .map_err(io::Error::other)?;
     let marker = state_directory
         .path()
         .join("pipeline-spawned-after-shutdown");
@@ -393,7 +378,6 @@ async fn shutdown_period_plugin_commit_does_not_start_a_new_pipeline() -> io::Re
         config,
         crate::runner::process_resources::test_support::unavailable(),
         state_layout,
-        recovered,
         CapturedRunnerExecutable::from_file(File::open(&executable)?)?,
         None,
         RunnerHooks::default(),
@@ -409,7 +393,7 @@ async fn shutdown_period_plugin_commit_does_not_start_a_new_pipeline() -> io::Re
         stream
             .write_all(
                 format!(
-                    "POST /plugins HTTP/1.1\r\nHost: {http_address}\r\nConnection: close\r\nContent-Type: application/vnd.apache.tenon.plugin+tar+gzip\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+                    "POST /plugins HTTP/1.1\r\nHost: {http_address}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
                     package.len(),
                 )
                 .as_bytes(),
@@ -502,12 +486,6 @@ async fn observe_unattached_pipeline(shutdown: UnattachedShutdown) -> io::Result
     let config = RunnerConfig::load(&config_path).map_err(io::Error::other)?;
     let state_layout =
         prepare_runner_state_directory(state_directory.path()).map_err(io::Error::other)?;
-    let recovered = recover(
-        &config,
-        &state_layout,
-        &RunnerHooks::default().document_protection,
-    )
-    .map_err(io::Error::other)?;
     let process_marker = state_directory.path().join("pipeline.pid");
     let executable = state_directory.path().join("pipeline.sh");
     fs::write(
@@ -524,7 +502,6 @@ async fn observe_unattached_pipeline(shutdown: UnattachedShutdown) -> io::Result
         config,
         crate::runner::process_resources::test_support::unavailable(),
         state_layout,
-        recovered,
         CapturedRunnerExecutable::from_file(File::open(&executable)?)?,
         None,
         RunnerHooks::default(),
@@ -534,7 +511,9 @@ async fn observe_unattached_pipeline(shutdown: UnattachedShutdown) -> io::Result
     .map_err(io::Error::other)?
     .run_until_shutdown(async {
         time::timeout(Duration::from_secs(5), async {
-            while !shutdown_marker.is_file() {
+            while !fs::read_to_string(&shutdown_marker)
+                .is_ok_and(|value| value.trim().parse::<i32>().is_ok())
+            {
                 time::sleep(Duration::from_millis(5)).await;
             }
             let mut observed_starting = false;
@@ -609,5 +588,88 @@ async fn observe_unattached_pipeline(shutdown: UnattachedShutdown) -> io::Result
         .ok_or_else(|| io::Error::other("Pipeline process id is invalid"))?;
     assert_eq!(test_kill_process(process_id), Err(Errno::SRCH));
     metrics.shutdown();
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn policy_change_during_recovery_is_applied_before_pipeline_start() -> io::Result<()> {
+    use crate::runner::extensions::{
+        ArtifactProtection, ExecutionDenied, ExecutionPermit, ExecutionPolicy, ExecutionScope,
+        NoHttpAuth, PolicyChanges,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct Policy {
+        denied: Arc<AtomicBool>,
+        changes: PolicyChanges,
+    }
+    impl ExecutionPolicy for Policy {
+        fn authorize(
+            &self,
+            _scope: ExecutionScope<'_>,
+        ) -> Result<ExecutionPermit, ExecutionDenied> {
+            if self.denied.load(Ordering::Acquire) {
+                Err(ExecutionDenied::new(
+                    "test.recovery_denied",
+                    "Execution is not permitted",
+                    None,
+                ))
+            } else {
+                Ok(ExecutionPermit::default())
+            }
+        }
+        fn changes(&self) -> Option<PolicyChanges> {
+            Some(self.changes.clone())
+        }
+    }
+    struct Protection {
+        denied: Arc<AtomicBool>,
+        changes: tokio::sync::watch::Sender<()>,
+    }
+    impl ArtifactProtection for Protection {
+        fn protect(&self, source: &[u8], output: &mut dyn io::Write) -> io::Result<()> {
+            output.write_all(source)
+        }
+        fn unprotect(&self, stored: &[u8], output: &mut dyn io::Write) -> io::Result<()> {
+            output.write_all(stored)?;
+            self.denied.store(true, Ordering::Release);
+            self.changes.send_replace(());
+            Ok(())
+        }
+    }
+    let root = tempfile::tempdir()?;
+    let config = load_config(root.path())?;
+    let layout = prepare_runner_state_directory(root.path()).map_err(io::Error::other)?;
+    write_document(root.path(), "notify-recovery", document("notify-recovery"))?;
+    let denied = Arc::new(AtomicBool::new(false));
+    let (changes, receiver) = tokio::sync::watch::channel(());
+    let hooks = RunnerHooks::new(
+        Policy {
+            denied: Arc::clone(&denied),
+            changes: receiver,
+        },
+        Protection { denied, changes },
+        NoHttpAuth,
+    );
+    let error = RunnerMainLoop::start(
+        config,
+        crate::runner::process_resources::test_support::unavailable(),
+        layout,
+        CapturedRunnerExecutable::capture_current()?,
+        None,
+        hooks,
+        crate::metrics::test_support::runner()?,
+    )
+    .await
+    .err()
+    .ok_or_else(|| io::Error::other("Recovery notification was lost"))?;
+    assert_eq!(error.code(), "test.recovery_denied");
+    assert_eq!(
+        fs::read_dir(root.path().join("tenon-documents"))?.count(),
+        1
+    );
+    assert_eq!(fs::read_dir(root.path().join("pipelines"))?.count(), 0);
     Ok(())
 }

@@ -50,10 +50,7 @@ fn multiple_objects_report_transitions_and_only_successful_automatic_spawns() ->
             address,
             "POST",
             "/plugins",
-            &[(
-                "Content-Type",
-                "application/vnd.apache.tenon.plugin+tar+gzip"
-            )],
+            &[("Content-Type", "application/octet-stream")],
             &package
         )?
         .status,
@@ -194,9 +191,12 @@ fn multiple_objects_report_transitions_and_only_successful_automatic_spawns() ->
         ),
         BTreeMap::from([("gateway".into(), 1.0)])
     );
-    let executable = directory
-        .path()
-        .join("plugins/programs/com.example.gateway/1.0.0/plugin.sh");
+    let executable = plugin_fixture::runtime_program_directory(
+        directory.path(),
+        "com.example.gateway",
+        "1.0.0",
+    )?
+    .join("plugin.sh");
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o600))?;
     kill(read_pid(&alpha_instance)?)?;
     wait_plugin_values(

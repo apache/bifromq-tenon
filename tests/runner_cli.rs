@@ -30,8 +30,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use std::{fs, iter, thread};
 
-#[path = "support/file_tree.rs"]
-mod file_tree;
+use plugin_fixture::file_tree;
 #[path = "runner_cli/plugin_fixture.rs"]
 mod plugin_fixture;
 use file_tree::named_files;
@@ -515,14 +514,11 @@ fn unified_program_delete_failures_stop_all_pipelines_and_exit_nonzero() -> io::
     #[derive(Clone, Copy, Debug)]
     enum DeletionFault {
         NamespaceDrift,
-        TombstoneCleanup,
+        RuntimeCleanup,
     }
 
-    for fault in [
-        DeletionFault::NamespaceDrift,
-        DeletionFault::TombstoneCleanup,
-    ] {
-        if matches!(fault, DeletionFault::TombstoneCleanup) && geteuid().is_root() {
+    for fault in [DeletionFault::NamespaceDrift, DeletionFault::RuntimeCleanup] {
+        if matches!(fault, DeletionFault::RuntimeCleanup) && geteuid().is_root() {
             eprintln!("Skipping permission-denial scenario: it requires a non-root test user");
             continue;
         }
@@ -536,15 +532,8 @@ fn unified_program_delete_failures_stop_all_pipelines_and_exit_nonzero() -> io::
         let namespace = directory
             .path()
             .join("plugins/programs/com.example.gateway");
-        let package = namespace.join("1.0.0");
-        let resources = package.join("resources");
-        fs::create_dir(&resources)?;
-        fs::set_permissions(&resources, fs::Permissions::from_mode(0o700))?;
-        fs::write(resources.join("data.bin"), b"resource")?;
-        fs::set_permissions(
-            resources.join("data.bin"),
-            fs::Permissions::from_mode(0o500),
-        )?;
+        let package =
+            plugin_fixture::stored_package_path(directory.path(), "com.example.gateway", "1.0.0");
         for id in ["store-failure-a", "store-failure-b"] {
             write_document(
                 directory.path(),
@@ -572,7 +561,15 @@ fn unified_program_delete_failures_stop_all_pipelines_and_exit_nonzero() -> io::
             }
         })?;
         request.set_write_timeout(Some(PROCESS_DEADLINE))?;
-        let _permission_guard = match fault {
+        let runtime_program = plugin_fixture::runtime_program_directory(
+            directory.path(),
+            "com.example.gateway",
+            "1.0.0",
+        )?;
+        let resources = runtime_program.join("resources");
+        fs::create_dir(&resources)?;
+        fs::write(resources.join("data.bin"), b"resource")?;
+        let permission_guard = match fault {
             DeletionFault::NamespaceDrift => {
                 fs::rename(
                     &namespace,
@@ -581,7 +578,7 @@ fn unified_program_delete_failures_stop_all_pipelines_and_exit_nonzero() -> io::
                 fs::write(&namespace, b"not a namespace")?;
                 None
             }
-            DeletionFault::TombstoneCleanup => Some(NonWritableDirectory::new(&resources)?),
+            DeletionFault::RuntimeCleanup => Some(NonWritableDirectory::new(&resources)?),
         };
 
         write!(
@@ -590,6 +587,7 @@ fn unified_program_delete_failures_stop_all_pipelines_and_exit_nonzero() -> io::
         )?;
         request.flush()?;
         wait_for_pipeline_shutdown_requests(&runtime_root, 2)?;
+        drop(permission_guard);
         let output = runner.wait()?;
 
         let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -607,26 +605,26 @@ fn unified_program_delete_failures_stop_all_pipelines_and_exit_nonzero() -> io::
             diagnostic.contains("Runner Plugin Program Store failed"),
             "{diagnostic}"
         );
-        assert!(
-            diagnostic.contains(namespace.to_string_lossy().as_ref()),
-            "{diagnostic}"
-        );
         match fault {
             DeletionFault::NamespaceDrift => {
                 assert!(
                     diagnostic.contains("Plugin Store integrity is invalid"),
                     "{diagnostic}"
                 );
+                assert!(
+                    diagnostic.contains(namespace.to_string_lossy().as_ref()),
+                    "{diagnostic}"
+                );
                 assert!(namespace.is_file());
             }
-            DeletionFault::TombstoneCleanup => {
+            DeletionFault::RuntimeCleanup => {
                 assert!(
-                    diagnostic.contains(".tenon-plugin-delete-1.0.0"),
+                    diagnostic.contains(runtime_program.to_string_lossy().as_ref()),
                     "{diagnostic}"
                 );
                 assert!(diagnostic.contains("Permission denied"), "{diagnostic}");
                 assert!(!package.exists());
-                assert!(namespace.join(".tenon-plugin-delete-1.0.0").is_dir());
+                assert!(namespace.join(".tenon-plugin-delete-92521fc3cbd964bdc9f584a991b89fddaa5754ed1cc96d6d42445338669c1305").is_file());
             }
         }
         wait_for_processes_to_exit(pipelines.into_iter().chain(plugins))?;

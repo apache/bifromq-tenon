@@ -21,7 +21,7 @@ use super::{
     SHA256_BYTES, TenonDocumentEtag, TenonDocumentStore, TenonDocumentStoreError, read_fixed_length,
 };
 use crate::identifiers::TenonDocumentId;
-use crate::runner::extensions::{DocumentProtection, Plaintext};
+use crate::runner::extensions::{ArtifactProtection, ByPass};
 use crate::runner::state_directory::TENON_DOCUMENT_STORE_DIRECTORY_NAME;
 use sha2::{Digest as _, Sha256};
 use std::error::Error as _;
@@ -33,7 +33,7 @@ use std::{env, fs, process};
 
 struct PartialProtectionFailure;
 
-impl DocumentProtection for PartialProtectionFailure {
+impl ArtifactProtection for PartialProtectionFailure {
     fn protect(&self, _source: &[u8], output: &mut dyn io::Write) -> io::Result<()> {
         output.write_all(b"partial protected output")?;
         Err(io::Error::other("Test protection failed"))
@@ -53,7 +53,7 @@ fn partial_protection_failure_preserves_the_committed_file() -> io::Result<()> {
     let store = directory.store();
     let original = b"original source";
     store
-        .commit(&id, original, &Plaintext)
+        .commit(&id, original, &ByPass)
         .map_err(io::Error::other)?;
     let error = store
         .commit(&id, b"replacement", &PartialProtectionFailure)
@@ -156,7 +156,7 @@ fn missing_store_is_a_read_failure_and_is_not_created() -> io::Result<()> {
 
     let error = state_directory
         .store()
-        .sources(Arc::new(Plaintext))
+        .sources(Arc::new(ByPass))
         .err()
         .ok_or_else(|| io::Error::other("missing Store was treated as empty"))?;
 
@@ -172,9 +172,7 @@ fn source_bytes_are_read_when_iteration_reaches_the_file() -> io::Result<()> {
     let path = store_directory.join(committed_file_name("document"));
     fs::write(&path, b"old document")?;
     let store = state_directory.store();
-    let mut sources = store
-        .sources(Arc::new(Plaintext))
-        .map_err(io::Error::other)?;
+    let mut sources = store.sources(Arc::new(ByPass)).map_err(io::Error::other)?;
 
     fs::write(path, b"current source")?;
     let source = sources
@@ -203,9 +201,7 @@ fn first_physical_error_stops_source_iteration() -> io::Result<()> {
     let store_directory = state_directory.create_store()?;
     fs::write(store_directory.join("operator-note.txt"), b"note")?;
     let store = state_directory.store();
-    let mut sources = store
-        .sources(Arc::new(Plaintext))
-        .map_err(io::Error::other)?;
+    let mut sources = store.sources(Arc::new(ByPass)).map_err(io::Error::other)?;
 
     let result = sources
         .next()
@@ -225,9 +221,7 @@ fn malformed_committed_file_name_stops_source_iteration() -> io::Result<()> {
     let store_directory = state_directory.create_store()?;
     fs::write(store_directory.join("not-a-sha256.jsonc"), b"invalid")?;
     let store = state_directory.store();
-    let mut sources = store
-        .sources(Arc::new(Plaintext))
-        .map_err(io::Error::other)?;
+    let mut sources = store.sources(Arc::new(ByPass)).map_err(io::Error::other)?;
 
     let result = sources
         .next()
@@ -293,7 +287,7 @@ fn commit_does_not_recreate_a_missing_store() -> io::Result<()> {
 
     let error = state_directory
         .store()
-        .commit(&document_id, b"document source", &Plaintext)
+        .commit(&document_id, b"document source", &ByPass)
         .err()
         .ok_or_else(|| io::Error::other("commit recreated a missing Store"))?;
 
@@ -419,7 +413,7 @@ fn committed_directory_is_rejected() -> io::Result<()> {
     fs::create_dir(store_directory.join(committed_file_name("directory")))?;
     let store = state_directory.store();
     let result = store
-        .sources(Arc::new(Plaintext))
+        .sources(Arc::new(ByPass))
         .map_err(io::Error::other)?
         .next()
         .ok_or_else(|| io::Error::other("committed directory was ignored"))?;
@@ -449,7 +443,7 @@ fn committed_symbolic_link_is_rejected() -> io::Result<()> {
     )?;
     let store = state_directory.store();
     let result = store
-        .sources(Arc::new(Plaintext))
+        .sources(Arc::new(ByPass))
         .map_err(io::Error::other)?
         .next()
         .ok_or_else(|| io::Error::other("committed symbolic link was ignored"))?;
@@ -474,7 +468,7 @@ fn existing_store_path_must_be_a_directory() -> io::Result<()> {
         b"not a directory",
     )?;
 
-    let Err(error) = state_directory.store().sources(Arc::new(Plaintext)) else {
+    let Err(error) = state_directory.store().sources(Arc::new(ByPass)) else {
         return Err(io::Error::other("store file was accepted as a directory"));
     };
     assert_eq!(error.code(), "tenon_document_store.directory_read_failed");

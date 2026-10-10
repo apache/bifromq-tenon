@@ -32,7 +32,7 @@ use super::{
     RunnerManagementQuery,
 };
 use crate::config::ScriptVmLimits;
-use crate::runner::extensions::{DocumentProtection, ExecutionDenied, ExecutionScope};
+use crate::runner::extensions::{ArtifactProtection, ExecutionDenied, ExecutionScope};
 use crate::runner::plugin::store::PluginStoreError;
 use crate::runner::recovery::RecoveredRunnerState;
 use crate::tenon_document::verified::TenonDocumentVerifier;
@@ -61,6 +61,15 @@ pub(crate) struct RecoveredRunnerManagement {
     initial_pipeline_directives: Box<[PipelineDirective]>,
 }
 
+impl RecoveredRunnerManagement {
+    pub(crate) fn check_execution(
+        &self,
+        authorize: impl FnOnce(ExecutionScope<'_>) -> Result<(), ExecutionDenied>,
+    ) -> Result<(), ExecutionDenied> {
+        self.state.check_execution(authorize)
+    }
+}
+
 /// Owns all scheduling around the Runner's mutable management facts.
 pub(crate) struct RunnerManagementSupervisor {
     state: RunnerManagementState,
@@ -69,15 +78,24 @@ pub(crate) struct RunnerManagementSupervisor {
     mutation_task: Option<JoinHandle<Result<ManagementMutationResult, PluginStoreError>>>,
     document_preparations: VecDeque<JoinHandle<ManagementDocumentPreparationResult>>,
     pipeline_publication: PipelinePublication,
+    // A policy notification arrived during this mutation. Clear after completion.
+    recheck_after_mutation: bool,
 }
 
 impl RunnerManagementSupervisor {
+    pub(crate) fn check_execution(
+        &mut self,
+        authorize: impl FnOnce(ExecutionScope<'_>) -> Result<(), ExecutionDenied>,
+    ) -> Result<(), ExecutionDenied> {
+        self.recheck_after_mutation |= self.mutation_task.is_some();
+        self.state.check_execution(authorize)
+    }
     /// Restores management facts without opening their command interface.
     pub(crate) fn recover(
         state_directory: &Path,
         script_vm_limits: ScriptVmLimits,
         recovered: RecoveredRunnerState,
-        document_protection: Arc<dyn DocumentProtection>,
+        artifact_protection: Arc<dyn ArtifactProtection>,
         metrics: Option<&Meter>,
         authorize: impl FnMut(ExecutionScope<'_>) -> Result<(), ExecutionDenied>,
     ) -> io::Result<RecoveredRunnerManagement> {
@@ -85,7 +103,7 @@ impl RunnerManagementSupervisor {
             state_directory,
             script_vm_limits,
             recovered,
-            document_protection,
+            artifact_protection,
             metrics,
             authorize,
         )?;
@@ -109,6 +127,7 @@ impl RunnerManagementSupervisor {
                 mutation_task: None,
                 document_preparations: VecDeque::new(),
                 pipeline_publication: PipelinePublication::Open,
+                recheck_after_mutation: false,
             },
             management,
             recovered.initial_pipeline_directives,
@@ -128,8 +147,16 @@ impl RunnerManagementSupervisor {
             tokio::select! {
                 result = wait_for_mutation(&mut self.mutation_task), if self.mutation_task.is_some() => {
                     self.mutation_task = None;
+                    let recheck = std::mem::take(&mut self.recheck_after_mutation)
+                        && self.pipeline_publication == PipelinePublication::Open
+                        && matches!(&result, Ok(Ok(ManagementMutationResult::PutDocument { result: Ok(_), .. })));
                     match self.complete_mutation(result) {
-                        Ok(Some(commit)) => return RunnerManagementEvent::CommitReady(commit),
+                        Ok(Some(commit)) => {
+                            if recheck && let Err(source) = self.state.check_execution(&mut authorize) {
+                                return RunnerManagementEvent::Failure(RunnerManagementSupervisorError::ExecutionDenied(source));
+                            }
+                            return RunnerManagementEvent::CommitReady(commit);
+                        }
                         Ok(None) => {}
                         Err(source) => return RunnerManagementEvent::Failure(source),
                     }
@@ -224,6 +251,7 @@ impl RunnerManagementSupervisor {
         self.mutation_task.as_ref()?;
         let result = wait_for_mutation(&mut self.mutation_task).await;
         self.mutation_task = None;
+        self.recheck_after_mutation = false;
         self.complete_mutation(result).err()
     }
 
@@ -328,12 +356,14 @@ pub(crate) enum RunnerManagementSupervisorError {
     Task(JoinError),
     /// Preserves the Store failure that requires the whole Runner to stop.
     ProgramStore(PluginStoreError),
+    ExecutionDenied(ExecutionDenied),
     InterfaceClosed,
 }
 
 impl fmt::Display for RunnerManagementSupervisorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ExecutionDenied(_) => formatter.write_str("Runner execution is not permitted"),
             Self::Task(_) => formatter.write_str("Runner management task failed"),
             Self::ProgramStore(_) => formatter.write_str("Runner Plugin Program Store failed"),
             Self::InterfaceClosed => formatter.write_str("Runner management interface closed"),
@@ -344,6 +374,7 @@ impl fmt::Display for RunnerManagementSupervisorError {
 impl Error for RunnerManagementSupervisorError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::ExecutionDenied(source) => Some(source),
             Self::Task(source) => Some(source),
             Self::ProgramStore(source) => Some(source),
             Self::InterfaceClosed => None,
@@ -372,6 +403,7 @@ pub(crate) mod test_support {
                 mutation_task: None,
                 document_preparations: VecDeque::new(),
                 pipeline_publication: PipelinePublication::Open,
+                recheck_after_mutation: false,
             },
             management,
         )
@@ -380,6 +412,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    mod policy_changes;
     mod programs;
     mod uploads;
 
@@ -431,6 +464,7 @@ mod tests {
             mutation_task: Some(mutation_task),
             document_preparations: VecDeque::new(),
             pipeline_publication: PipelinePublication::Open,
+            recheck_after_mutation: false,
         };
         let _ = finish.send(());
         let RunnerManagementEvent::CommitReady(commit) = supervisor.next_event(|_| Ok(())).await
@@ -492,6 +526,7 @@ mod tests {
             mutation_task: Some(mutation_task),
             document_preparations: VecDeque::new(),
             pipeline_publication: PipelinePublication::Open,
+            recheck_after_mutation: false,
         };
 
         let shutdown = supervisor.shutdown();
@@ -536,6 +571,7 @@ mod tests {
             mutation_task: Some(mutation_task),
             document_preparations: VecDeque::new(),
             pipeline_publication: PipelinePublication::Open,
+            recheck_after_mutation: false,
         };
 
         let fill_queue = async move {
@@ -635,6 +671,7 @@ mod tests {
             mutation_task: None,
             document_preparations: VecDeque::from([first_task, second_task]),
             pipeline_publication: PipelinePublication::Open,
+            recheck_after_mutation: false,
         };
 
         let release_preparations = async move {

@@ -19,12 +19,15 @@
 
 //! Exercises a separately linked distribution through real HTTP and child processes.
 
-#[path = "support/file_tree.rs"]
-mod file_tree;
+#[path = "runner_extensions/artifacts.rs"]
+mod artifacts;
+use plugin_fixture::file_tree;
 #[path = "runner_extensions/http_authorization.rs"]
 mod http_authorization;
 #[path = "runner_cli/plugin_fixture.rs"]
 mod plugin_fixture;
+#[path = "runner_extensions/policy_changes.rs"]
+mod policy_changes;
 #[path = "support/runner_http.rs"]
 mod runner_http_support;
 
@@ -273,7 +276,12 @@ fn startup_accepts_cumulatively_and_continues_after_a_middle_rejection() -> io::
         .collect::<Vec<_>>();
     assert_eq!(
         ids,
-        [vec!["doc1"], vec!["doc1", "doc2"], vec!["doc1", "doc3"]]
+        [
+            vec![],
+            vec!["doc1"],
+            vec!["doc1", "doc2"],
+            vec!["doc1", "doc3"]
+        ]
     );
     for id in ["doc1", "doc2", "doc3"] {
         assert_eq!(
@@ -387,7 +395,7 @@ fn plugin_installation_uses_the_already_authorized_desired_state() -> io::Result
     let config = configure(
         root.path(),
         address,
-        serde_json::json!({"maximumAuthorizations": 1}),
+        serde_json::json!({"maximumAuthorizations": 2}),
     )?;
     let mut runner = TestRunner::spawn_with_executable(&config, Path::new(EXECUTABLE))?;
     wait_for_http(&mut runner, address)?;
@@ -396,17 +404,12 @@ fn plugin_installation_uses_the_already_authorized_desired_state() -> io::Result
         address,
         "POST",
         "/plugins",
-        &[(
-            "Content-Type",
-            "application/vnd.apache.tenon.plugin+tar+gzip",
-        )],
+        &[("Content-Type", "application/octet-stream")],
         &package,
     )?;
     assert_eq!(installed.status, 201, "{}", installed.body_text());
     assert!(
-        root.path()
-            .join("plugins/programs/com.example.modbus/1.0.0/manifest.json")
-            .is_file()
+        plugin_fixture::stored_package_path(root.path(), "com.example.modbus", "1.0.0").is_file()
     );
     assert_eq!(
         request(address, "GET", "/documents/waiting", &[], &[])?.status,
@@ -505,7 +508,7 @@ fn failed_document_write_keeps_the_new_authorization_deadline() -> io::Result<()
     let config = configure(
         root.path(),
         address,
-        serde_json::json!({"expiresAfterMs": 1500, "expiresFromAuthorization": 2}),
+        serde_json::json!({"expiresAfterMs": 1500, "expiresFromAuthorization": 3}),
     )?;
     let mut runner = TestRunner::spawn_with_executable(&config, Path::new(EXECUTABLE))?;
     wait_for_http(&mut runner, address)?;
@@ -541,7 +544,7 @@ fn rejected_document_updates_entitlement_and_expires_running_processes() -> io::
     let config = configure(
         root.path(),
         address,
-        serde_json::json!({"expiresAfterMs": 1500, "expiresFromAuthorization": 2, "maximumDocuments": 1}),
+        serde_json::json!({"expiresAfterMs": 1500, "expiresFromAuthorization": 3, "maximumDocuments": 1}),
     )?;
     let mut runner = TestRunner::spawn_with_executable(&config, Path::new(EXECUTABLE))?;
     wait_for_http(&mut runner, address)?;
@@ -578,7 +581,7 @@ fn automatic_pipeline_restart_uses_the_already_authorized_desired_state() -> io:
     let config = configure(
         root.path(),
         address,
-        serde_json::json!({"maximumAuthorizations": 1, "initializeMarker": root.path().join("initialized")}),
+        serde_json::json!({"maximumAuthorizations": 2, "initializeMarker": root.path().join("initialized")}),
     )?;
     let mut runner = TestRunner::spawn_with_executable(&config, Path::new(EXECUTABLE))?;
     let processes = running_processes(root.path())?;
@@ -619,7 +622,7 @@ fn unfinished_upload_cannot_delay_expiry_even_after_normal_shutdown_begins() -> 
         upload.set_read_timeout(Some(runner_http_support::DEADLINE))?;
         write!(
             upload,
-            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/vnd.apache.tenon.plugin+tar+gzip\r\nContent-Length: 1000000\r\nExpect: 100-continue\r\n\r\n"
+            "POST /plugins HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/octet-stream\r\nContent-Length: 1000000\r\nExpect: 100-continue\r\n\r\n"
         )?;
         runner_http_support::read_continue_response(&mut upload)?;
         if begin_normal_shutdown {
@@ -794,8 +797,8 @@ fn policy_observes_only_desired_documents_while_old_revisions_are_still_running(
         .lines()
         .map(serde_json::from_str)
         .collect::<Result<_, _>>()?;
-    assert_eq!(scopes.len(), 4);
-    let mut final_scope = scopes[3]
+    assert_eq!(scopes.len(), 5);
+    let mut final_scope = scopes[4]
         .as_array()
         .ok_or_else(|| io::Error::other("Scope is not an array"))?
         .clone();

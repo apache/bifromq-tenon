@@ -50,11 +50,16 @@ pub(super) fn captured_runner_executable() -> io::Result<CapturedRunnerExecutabl
 
 pub(super) fn install_plugin(state_directory: &Path, interface: PluginInterface) -> io::Result<()> {
     let layout = prepare_runner_state_directory(state_directory).map_err(io::Error::other)?;
-    PluginProgramStore::recover(layout.plugin_program_store_directory())
-        .map_err(io::Error::other)?
-        .install(Cursor::new(valid_program_package(interface)?))
-        .map(drop)
-        .map_err(io::Error::other)
+    let runtime = tempfile::tempdir_in(layout.pipeline_runtime_directory())?;
+    PluginProgramStore::recover(
+        layout.plugin_program_store_directory(),
+        runtime.path().to_path_buf(),
+        std::sync::Arc::new(crate::runner::extensions::ByPass),
+    )
+    .map_err(io::Error::other)?
+    .install(Cursor::new(valid_program_package(interface)?))
+    .map(drop)
+    .map_err(io::Error::other)
 }
 
 pub(super) fn write_document(
@@ -122,7 +127,8 @@ pub(super) fn target(
     let (documents, programs) = recover(
         config,
         &state_layout,
-        &RunnerHooks::default().document_protection,
+        &RunnerHooks::default().artifact_protection,
+        &state_layout.pipeline_runtime_directory(),
     )
     .map_err(io::Error::other)?
     .into_parts();

@@ -19,7 +19,7 @@
 
 //! Safe staging and validation for Plugin Program packages.
 //!
-//! Archive and Config Schema safety stay behind this package boundary.
+//! This module checks directory paths and Config Schemas.
 //! It does not publish Store state, expose HTTP resources, or start processes.
 
 mod safety;
@@ -28,12 +28,14 @@ use super::platform::Platform;
 use crate::contracts::plugin::manifest_schema_bytes;
 use crate::identifiers::{ExactVersion, ProgramName};
 use crate::payload_contract::{PluginInterface, PluginProgramPayloadContract};
+use crate::runner::extensions;
 use crate::strict_jsonc::parse_json;
+use extensions::ArtifactProtection;
 pub(super) use safety::PluginConfigSchema;
 pub(crate) use safety::PluginPackageError;
 use safety::{
-    InspectedPackageDirectory, StagedPackageArchive, inspect_package_directory,
-    package_files_are_identical, stage_package_archive,
+    InspectedPackageDirectory, StagedPackageDirectory, inspect_package_directory,
+    package_files_are_identical, stage_package_directory,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -44,7 +46,7 @@ use std::path::Path;
 #[must_use = "dropping a staged Program package removes its temporary directory"]
 #[derive(Debug)]
 pub(crate) struct StagedPluginProgramPackage {
-    archive: StagedPackageArchive,
+    directory: StagedPackageDirectory,
     validated: ValidatedPluginProgramPackage,
 }
 
@@ -55,13 +57,13 @@ impl StagedPluginProgramPackage {
     ///
     /// Returns the filesystem error when the staging tree cannot be removed.
     pub(super) fn close(self) -> io::Result<()> {
-        self.archive.close()
+        self.directory.close()
     }
 
     /// Returns the root of the private validated temporary tree.
     #[must_use]
     pub(crate) fn path(&self) -> &Path {
-        self.archive.path()
+        self.directory.path()
     }
 
     /// Returns the validated Program name used for the Store identity path.
@@ -94,7 +96,7 @@ impl StagedPluginProgramPackage {
         package_files_are_identical(
             self.path(),
             &self.validated.manifest_bytes,
-            self.archive.file_digests(),
+            self.directory.file_digests(),
             existing_root,
             &existing.validated.manifest_bytes,
             &existing.file_digests,
@@ -107,8 +109,14 @@ impl StagedPluginProgramPackage {
     pub(super) fn into_snapshot(self) -> ValidatedPluginProgramSnapshot {
         ValidatedPluginProgramSnapshot {
             validated: self.validated,
-            file_digests: self.archive.into_file_digests(),
+            file_digests: self.directory.into_file_digests(),
         }
+    }
+
+    /// Transfers file cleanup to the Runner runtime owner.
+    pub(super) fn into_runtime(mut self) -> (std::path::PathBuf, ValidatedPluginProgramSnapshot) {
+        self.directory.keep();
+        (self.path().to_path_buf(), self.into_snapshot())
     }
 }
 
@@ -201,21 +209,25 @@ impl ValidatedPluginProgramSnapshot {
 /// archive, fixed files, manifest, Config Schema, or shared
 /// payload descriptor violates its current contract.
 pub(crate) fn stage_plugin_program_package(
+    protection: &dyn ArtifactProtection,
     package: impl Read,
     staging_parent: &Path,
 ) -> Result<StagedPluginProgramPackage, PluginPackageError> {
-    let archive = stage_package_archive(package, staging_parent)?;
+    let directory = stage_package_directory(protection, package, staging_parent)?;
     let validated = (|| {
         validate_program_materials(
-            archive.read_manifest()?,
-            archive.read_config_schema()?,
-            archive.read_payload_descriptor()?,
+            directory.read_manifest()?,
+            directory.read_config_schema()?,
+            directory.read_payload_descriptor()?,
         )
     })();
     match validated {
-        Ok(validated) => Ok(StagedPluginProgramPackage { archive, validated }),
+        Ok(validated) => Ok(StagedPluginProgramPackage {
+            directory,
+            validated,
+        }),
         Err(error) => {
-            archive
+            directory
                 .close()
                 .map_err(|source| PluginPackageError::FilesystemOperationFailed { source })?;
             Err(error)
@@ -223,7 +235,7 @@ pub(crate) fn stage_plugin_program_package(
     }
 }
 
-/// Revalidates one committed current Program directory through the shared tree boundary.
+/// Revalidates one Program runtime directory through the shared tree boundary.
 ///
 /// # Errors
 ///

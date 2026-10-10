@@ -19,8 +19,7 @@
 
 //! Resource-limit behavior through real Runner HTTP and child processes.
 
-#[path = "support/file_tree.rs"]
-mod file_tree;
+use plugin_fixture::file_tree;
 #[path = "runner_cli/plugin_fixture.rs"]
 mod plugin_fixture;
 #[path = "support/runner_http.rs"]

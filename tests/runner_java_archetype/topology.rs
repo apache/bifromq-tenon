@@ -200,10 +200,7 @@ fn install_bundle(address: SocketAddr, bundle: &[u8]) -> io::Result<()> {
         address,
         "POST",
         "/plugins",
-        &[(
-            "Content-Type",
-            "application/vnd.apache.tenon.plugin+tar+gzip",
-        )],
+        &[("Content-Type", "application/octet-stream")],
         bundle,
     )?;
     assert_eq!(installed.status, 201, "{}", installed.body_text());

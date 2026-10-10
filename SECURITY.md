@@ -95,7 +95,9 @@ Lua scripts can transform or discard data, send to configured Sinks and reveal d
 
 Linux Document CPU and memory limits require delegated cgroup v2 support. On macOS, these limits are ignored and execution continues. Per-VM and per-Flow limits do not impose a total node budget. See [resource enforcement](guide/runner.md#cpu-and-memory). The supplied [Docker configuration](deploy/container/README.md) grants `CAP_SYS_ADMIN` for cgroup management. That broad capability is inherited by child programs; use trusted plugins and retain container security policies.
 
-The HTTP API has no total Document or compressed-upload byte limit and no built-in per-principal rate or execution quota policy. Archive extraction has separate fixed bounds, which do not bound aggregate concurrent uploads, retained installations or all management costs. Deployers must set request size, rate, connection, execution, disk and resource budgets appropriate to their environment and protect the listener against network exhaustion. A TLS handshake deadline is not general denial-of-service protection.
+The HTTP API has no total byte limit for a Document or a received plugin package. The core applies fixed directory limits to every package format. The default decoder keeps limits on the decompressed tar stream and tar entries. These limits do not control total upload concurrency, installed data size, or all management costs. The core has no built-in rate limit or execution quota per caller.
+
+Deployers must set request size, rate, connection, execution, disk, and resource limits for their environment. Protect the listener against network exhaustion. A TLS handshake deadline does not prevent all denial-of-service attacks.
 
 ## Storage, secrets and observations
 
@@ -105,11 +107,13 @@ Use a separate state directory for each Runner and prevent access by untrusted w
 
 ## Extension responsibilities
 
-A custom Runner distribution can provide HTTP authorization, execution admission and Document storage protection. These features require custom code; they are not enabled by installing a plugin. See the [extension guide](guide/runner-extensions.md).
+A custom Runner distribution can provide HTTP authorization, execution admission and artifact protection. These features require custom code; they are not enabled by installing a plugin. See the [extension guide](guide/runner-extensions.md).
 
 - HTTP authorization can restrict methods and paths using request headers. The hook does not receive the body, query or TLS client identity. Policies that need those inputs require a gateway or other distribution support.
 - Execution admission can restrict the saved Document set or impose an entitlement deadline. It does not authenticate API callers or inspect plugin uploads.
-- Document protection can encrypt stored Documents. GET responses, plugin configuration and runtime memory still contain plaintext; protect access to those separately.
+- Artifact protection can encrypt stored Documents and decode package formats through the core directory writer. The core validates the directory before publication. A failed hook cannot publish partial output.
+
+  The core keeps the received package as the durable source for both standard archives and envelopes. GET responses, plugin configuration, and runtime files still contain plaintext. A host administrator can copy those files. The extension cannot prevent use of copied standard plugin materials.
 
 Custom distributions must document their policies, key management and failure behavior. The default Runner allows all requests and execution and stores Documents as plaintext.
 

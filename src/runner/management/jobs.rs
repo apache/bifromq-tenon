@@ -31,7 +31,7 @@ use super::{
 };
 use crate::identifiers::{ExactVersion, ProgramName, TenonDocumentId};
 use crate::runner::document_store::{TenonDocumentStore, TenonDocumentStoreError};
-use crate::runner::extensions::DocumentProtection;
+use crate::runner::extensions::ArtifactProtection;
 use crate::runner::plugin::package::PluginPackageError;
 use crate::runner::plugin::store::{
     PluginProgramInstallResult, PluginProgramStore, PluginStoreError,
@@ -73,7 +73,7 @@ pub(super) enum ManagementMutationJob {
         outcome: PutDocumentOutcome,
         response: ManagementReply<Result<PutDocumentOutcome, PutDocumentFailure>>,
         document_store_directory: PathBuf,
-        protection: Arc<dyn DocumentProtection>,
+        protection: Arc<dyn ArtifactProtection>,
     },
     DeleteDocument {
         id: TenonDocumentId,
@@ -220,6 +220,9 @@ fn program_install_failure(
     error: PluginStoreError,
 ) -> Result<PluginOperationFailure, PluginStoreError> {
     match error {
+        PluginStoreError::PackageAccessRejected => {
+            Ok(PluginOperationFailure::Invalid { code: error.code() })
+        }
         PluginStoreError::PlatformMismatch { platforms } => {
             Ok(PluginOperationFailure::PlatformMismatch { platforms })
         }

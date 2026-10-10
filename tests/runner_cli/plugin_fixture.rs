@@ -29,11 +29,15 @@ use prost_types::{
     DescriptorProto, FileDescriptorProto, FileDescriptorSet, SourceCodeInfo, source_code_info,
 };
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[path = "../support/file_tree.rs"]
+pub(crate) mod file_tree;
 
 pub(crate) use tenon::runner_test_support::contracts::core::PluginInterface;
 #[path = "../support/controlled_plugin.rs"]
@@ -53,20 +57,57 @@ pub(crate) fn install_program(
 ) -> io::Result<InstalledProgramFixture> {
     let files = program_files(interface, None)?;
     let (program_name, _) = program_identity(interface);
-    let plugins = state_directory.join("plugins");
-    let programs = plugins.join("programs");
-    let program_root = programs.join(program_name);
-    let package = program_root.join("1.0.0");
-    for directory in [&plugins, &programs, &program_root, &package] {
-        create_private_directory(directory)?;
-    }
-    for (path, bytes) in &files {
-        write_private_file(&package.join(path), bytes)?;
-    }
-    Ok(InstalledProgramFixture {
+    let fixture = InstalledProgramFixture {
         config_schema: files["config.schema.json"].clone(),
         payload_descriptor: files["payload.descriptor.pb"].clone(),
-    })
+    };
+    write_package(state_directory, program_name, "1.0.0", &archive(files)?)?;
+    Ok(fixture)
+}
+
+pub(crate) fn stored_package_path(state: &Path, name: &str, version: &str) -> PathBuf {
+    let hash: String = Sha256::digest(version.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    state
+        .join("plugins/programs")
+        .join(name)
+        .join(format!(".tenon-artifact-{hash}"))
+}
+
+pub(crate) fn write_package(
+    state: &Path,
+    name: &str,
+    version: &str,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let plugins = state.join("plugins");
+    let programs = plugins.join("programs");
+    let namespace = programs.join(name);
+    for directory in [&plugins, &programs, &namespace] {
+        create_private_directory(directory)?;
+    }
+    let path = stored_package_path(state, name, version);
+    fs::write(&path, bytes)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+pub(crate) fn runtime_program_directory(
+    state: &Path,
+    name: &str,
+    version: &str,
+) -> io::Result<PathBuf> {
+    for manifest in file_tree::named_files(&state.join("pipelines"), "manifest.json")? {
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&manifest)?)?;
+        if value["programName"] == name && value["exactVersion"] == version {
+            return manifest
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| io::Error::other("Runtime manifest has no parent"));
+        }
+    }
+    Err(io::Error::other("Runtime Program directory is missing"))
 }
 
 pub(crate) fn plugin_package(interface: PluginInterface) -> io::Result<Vec<u8>> {
@@ -80,7 +121,7 @@ pub(crate) fn plugin_package_with_program(
     archive(program_files(interface, Some(program))?)
 }
 
-fn program_files(
+pub(crate) fn program_files(
     interface: PluginInterface,
     program: Option<&[u8]>,
 ) -> io::Result<BTreeMap<String, Vec<u8>>> {
@@ -131,7 +172,7 @@ fn program_identity(interface: PluginInterface) -> (&'static str, &'static str) 
     }
 }
 
-fn archive(files: BTreeMap<String, Vec<u8>>) -> io::Result<Vec<u8>> {
+pub(crate) fn archive(files: BTreeMap<String, Vec<u8>>) -> io::Result<Vec<u8>> {
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut archive = tar::Builder::new(encoder);
     for (path, bytes) in files {
@@ -192,11 +233,6 @@ fn payload_descriptor_file(kind: PluginInterface) -> FileDescriptorProto {
 fn create_private_directory(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
-
-fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    fs::write(path, bytes)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o500))
 }
 
 pub(crate) fn platforms() -> serde_json::Value {

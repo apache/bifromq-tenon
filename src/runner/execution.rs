@@ -17,34 +17,85 @@
  * under the License.
  */
 
-//! Separates policy decisions from the Runner's current entitlement deadline.
+//! Contains the policy, change notifications, and the Runner's entitlement deadline.
 
-use crate::runner::extensions::{ExecutionDenied, ExecutionPolicy, ExecutionScope};
-use std::future;
+use crate::runner::extensions::{ExecutionDenied, ExecutionPolicy, ExecutionScope, PolicyChanges};
+use std::future::{self, Future};
 use std::time::Instant;
 use tokio::sync::watch;
 use tokio::time;
 
 pub(super) struct RunnerExecution {
     policy: Box<dyn ExecutionPolicy>,
-    pub(super) expiry: ExecutionExpiry,
+    changes: Option<PolicyChanges>,
+    expiry: ExecutionExpiry,
 }
 
 impl RunnerExecution {
     pub(super) fn new(policy: Box<dyn ExecutionPolicy>) -> Self {
         Self {
+            changes: policy.changes(),
             policy,
             expiry: ExecutionExpiry::default(),
         }
     }
 
     pub(super) fn check(&self, scope: ExecutionScope<'_>) -> Result<(), ExecutionDenied> {
-        let decision = self.policy.authorize(scope);
-        self.expiry.update(match &decision {
+        Self::check_policy(self.policy.as_ref(), &self.expiry, scope)
+    }
+
+    /// Gives Pipeline supervision a handle to the same deadline.
+    pub(super) fn expiry(&self) -> ExecutionExpiry {
+        self.expiry.clone()
+    }
+
+    pub(super) async fn wait_for_expiry(&self) {
+        self.expiry.wait_for_expiry().await;
+    }
+
+    /// The event loop can wait for changes and do policy checks at the same time.
+    pub(super) fn split(
+        &mut self,
+    ) -> (
+        impl Fn(ExecutionScope<'_>) -> Result<(), ExecutionDenied> + '_,
+        impl Future<Output = bool> + '_,
+        &ExecutionExpiry,
+    ) {
+        let policy = self.policy.as_ref();
+        let expiry = &self.expiry;
+        (
+            move |scope| Self::check_policy(policy, expiry, scope),
+            Self::policy_changed(&mut self.changes),
+            expiry,
+        )
+    }
+
+    fn check_policy(
+        policy: &dyn ExecutionPolicy,
+        expiry: &ExecutionExpiry,
+        scope: ExecutionScope<'_>,
+    ) -> Result<(), ExecutionDenied> {
+        let decision = policy.authorize(scope);
+        expiry.update(match &decision {
             Ok(permit) => permit.entitlement_until,
             Err(denied) => denied.entitlement_until,
         });
         decision.map(|_| ())
+    }
+
+    async fn policy_changed(changes: &mut Option<PolicyChanges>) -> bool {
+        let Some(receiver) = changes else {
+            return future::pending().await;
+        };
+        if receiver.changed().await.is_ok() {
+            true
+        } else {
+            *changes = None;
+            eprintln!(
+                "runner.policy_changes_closed: Policy notifications stopped; the current deadline does not change"
+            );
+            false
+        }
     }
 }
 
@@ -104,6 +155,103 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tokio::task;
+
+    struct NotifiedPolicy {
+        state: Rc<RefCell<Result<ExecutionPermit, ExecutionDenied>>>,
+        receiver: PolicyChanges,
+        subscriptions: Rc<Cell<usize>>,
+    }
+
+    impl ExecutionPolicy for NotifiedPolicy {
+        fn authorize(
+            &self,
+            _scope: ExecutionScope<'_>,
+        ) -> Result<ExecutionPermit, ExecutionDenied> {
+            self.state.borrow().clone()
+        }
+
+        fn changes(&self) -> Option<PolicyChanges> {
+            self.subscriptions.set(self.subscriptions.get() + 1);
+            Some(self.receiver.clone())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn notifications_survive_cancellation_and_use_the_latest_state()
+    -> Result<(), ExecutionDenied> {
+        let (updates, receiver) = watch::channel(());
+        let state = Rc::new(RefCell::new(Ok(ExecutionPermit {
+            entitlement_until: Some((time::Instant::now() + Duration::from_secs(1)).into_std()),
+        })));
+        let subscriptions = Rc::new(Cell::new(0));
+        let mut execution = RunnerExecution::new(Box::new(NotifiedPolicy {
+            state: Rc::clone(&state),
+            receiver,
+            subscriptions: Rc::clone(&subscriptions),
+        }));
+        execution.check(ExecutionScope { documents: &[] })?;
+        {
+            let (check, policy_changed, _) = execution.split();
+            tokio::select! {
+                biased;
+                _ = policy_changed => panic!("No update was sent"),
+                result = async {
+                    task::yield_now().await;
+                    check(ExecutionScope { documents: &[] })
+                } => result?,
+            }
+        }
+        *state.borrow_mut() = Err(ExecutionDenied::new(
+            "test.denied",
+            "Execution is not permitted",
+            None,
+        ));
+        updates.send_replace(());
+        *state.borrow_mut() = Ok(ExecutionPermit::default());
+        updates.send_replace(());
+        {
+            let (check, policy_changed, _) = execution.split();
+            assert!(policy_changed.await);
+            check(ExecutionScope { documents: &[] })?;
+        }
+        time::advance(Duration::from_secs(2)).await;
+        assert!(!execution.expiry.is_expired());
+        assert_eq!(subscriptions.get(), 1);
+        let (_, policy_changed, _) = execution.split();
+        tokio::select! {
+            biased;
+            _ = policy_changed => panic!("A merged update was read twice"),
+            () = task::yield_now() => {},
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_notifications_preserve_expiry_and_disable_the_wait()
+    -> Result<(), ExecutionDenied> {
+        let (updates, receiver) = watch::channel(());
+        let state = Rc::new(RefCell::new(Ok(ExecutionPermit {
+            entitlement_until: Some((time::Instant::now() + Duration::from_secs(1)).into_std()),
+        })));
+        let mut execution = RunnerExecution::new(Box::new(NotifiedPolicy {
+            state,
+            receiver,
+            subscriptions: Rc::new(Cell::new(0)),
+        }));
+        execution.check(ExecutionScope { documents: &[] })?;
+        drop(updates);
+        let (_, policy_changed, _) = execution.split();
+        assert!(!policy_changed.await);
+        let (_, policy_changed, _) = execution.split();
+        tokio::select! {
+            biased;
+            _ = policy_changed => panic!("Closed channel caused a ready loop"),
+            () = task::yield_now() => {},
+        }
+        time::advance(Duration::from_secs(1)).await;
+        assert!(execution.expiry.is_expired());
+        Ok(())
+    }
 
     struct Policy(Rc<RefCell<Result<ExecutionPermit, ExecutionDenied>>>);
 

@@ -54,7 +54,7 @@ impl RunnerMainLoop {
             loop {
                 tokio::select! {
                     biased;
-                    () = execution.expiry.wait_for_expiry() => {
+                    () = execution.wait_for_expiry() => {
                         failures.push(Some(RunnerMainLoopError::ExecutionExpired));
                         failures.push(http_server.abort().await.map(RunnerMainLoopError::HttpServer));
                         break;

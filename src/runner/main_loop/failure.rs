@@ -22,9 +22,11 @@
 use crate::error::ErrorChain;
 use crate::identifiers::TenonDocumentId;
 use crate::runner::control_server::RunnerControlServerError;
+use crate::runner::extensions::ExecutionDenied;
 use crate::runner::http::RunnerHttpServerError;
 use crate::runner::management::RunnerManagementSupervisorError;
 use crate::runner::pipeline_supervisor::PipelineSupervisorError;
+use crate::runner::recovery::RunnerRecoveryError;
 use crate::runner::runtime_resources::RunnerRuntimeResourcesError;
 use crate::tenon_document::TenonDocumentVerifierInitializationError;
 use std::error::Error;
@@ -149,6 +151,8 @@ pub(super) enum RunnerMainLoopError {
     CpuObservation(io::Error),
     ProcessResources(io::Error),
     ExecutionExpired,
+    Recovery(RunnerRecoveryError),
+    ExecutionDenied(ExecutionDenied),
     RuntimeResources(RunnerRuntimeResourcesError),
     ShutdownSignal(io::Error),
     ControlServer(RunnerControlServerError),
@@ -168,11 +172,16 @@ impl RunnerMainLoopError {
         match self {
             Self::CpuObservation(_) => "runner.cpu_observation_failed",
             Self::ExecutionExpired => "runner.execution_permit_expired",
+            Self::Recovery(source) => source.code(),
+            Self::ExecutionDenied(source) => source.code(),
             Self::ProcessResources(_) => "runner.process_resource_recovery_failed",
             Self::RuntimeResources(source) => source.code(),
             Self::ShutdownSignal(_) => "runner.shutdown_signal_failed",
             Self::ControlServer(_) => "runner.pipeline_control_failed",
             Self::HttpServer(_) => "runner.http_server_failed",
+            Self::Management(RunnerManagementSupervisorError::ExecutionDenied(source)) => {
+                source.code()
+            }
             Self::ManagementInitialization(_) | Self::Management(_) => "runner.management_failed",
             Self::Pipeline(_) => "runner.pipeline_lifecycle_failed",
             Self::AdditionalFailures { primary, .. } => primary.code(),
@@ -192,6 +201,8 @@ impl fmt::Display for RunnerMainLoopError {
             Self::ExecutionExpired => {
                 formatter.write_str("Runner execution entitlement has expired")
             }
+            Self::Recovery(_) => formatter.write_str("Runner startup recovery failed"),
+            Self::ExecutionDenied(_) => formatter.write_str("Runner execution is not permitted"),
             Self::RuntimeResources(source) => write!(formatter, "{source}"),
             Self::ShutdownSignal(_) => formatter.write_str("Runner shutdown signal stream failed"),
             Self::ControlServer(_) => {
@@ -223,6 +234,8 @@ impl Error for RunnerMainLoopError {
             Self::CpuObservation(source) => Some(source),
             Self::ProcessResources(source) => Some(source),
             Self::ExecutionExpired => None,
+            Self::Recovery(source) => Some(source),
+            Self::ExecutionDenied(source) => Some(source),
             Self::RuntimeResources(source) => Some(source),
             Self::ShutdownSignal(source) => Some(source),
             Self::ControlServer(source) => Some(source),

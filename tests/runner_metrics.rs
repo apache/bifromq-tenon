@@ -19,8 +19,7 @@
 
 //! Verifies HTTP metrics against real Runner and Plugin process behavior.
 
-#[path = "support/file_tree.rs"]
-mod file_tree;
+use plugin_fixture::file_tree;
 #[path = "runner_cli/plugin_fixture.rs"]
 mod plugin_fixture;
 #[path = "support/runner_http.rs"]
@@ -93,10 +92,7 @@ fn real_core_snapshots_follow_configuration_and_actual_process_restarts() -> io:
         address,
         "POST",
         "/plugins",
-        &[(
-            "Content-Type",
-            "application/vnd.apache.tenon.plugin+tar+gzip",
-        )],
+        &[("Content-Type", "application/octet-stream")],
         &plugin_package(PluginInterface::SourceAndSink)?,
     )?;
     assert_eq!(installed.status, 201, "{}", installed.body_text());

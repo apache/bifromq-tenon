@@ -142,14 +142,15 @@ async fn admitted_http_handler_drain_keeps_advancing_pipeline_state() -> io::Res
     let recovered = recover(
         &config,
         &state_layout,
-        &RunnerHooks::default().document_protection,
+        &RunnerHooks::default().artifact_protection,
+        &state_layout.pipeline_runtime_directory(),
     )
     .map_err(io::Error::other)?;
     let (state, initial_directives) = RunnerManagementState::recover(
         config.state_directory(),
         config.script_vm_limits(),
         recovered,
-        RunnerHooks::default().document_protection,
+        RunnerHooks::default().artifact_protection,
         None,
         |_| Ok(()),
     )?;

@@ -53,7 +53,7 @@ Start a local Runner with the [quickstart script](../guide/quickstart.md#run-the
 for report in /tmp/tenon-dummy-bundle.json /tmp/tenon-stdout-bundle.json; do
   bundle="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$report")"
   curl --fail -i -X POST http://127.0.0.1:18080/plugins \
-    -H 'Content-Type: application/vnd.apache.tenon.plugin+tar+gzip' \
+    -H 'Content-Type: application/octet-stream' \
     --data-binary "@$bundle"
 done
 ```

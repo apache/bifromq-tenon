@@ -20,7 +20,7 @@
 //! Tenon's executable library boundary.
 //!
 //! The default binary enters through [`run_main`]. Trusted distributions use
-//! [`run_main_with`] to install HTTP authorization, execution, and Document protection hooks. Runtime
+//! [`run_main_with`] to install HTTP authorization, execution, and artifact protection hooks. Runtime
 //! owners stay private; hooks receive immutable configuration and verified facts.
 
 use std::env;
@@ -32,8 +32,9 @@ pub use identifiers::{
     ExactVersion, FlowId, PluginInstanceId, PluginProgramIdentity, ProgramName, TenonDocumentId,
 };
 pub use runner::extensions::{
-    AllowAll, DocumentProtection, ExecutionDenied, ExecutionPermit, ExecutionPolicy,
-    ExecutionScope, HttpApiAuthorization, HttpAuthRejection, NoHttpAuth, Plaintext, RunnerHooks,
+    AllowAll, ArtifactProtection, ByPass, ExecutionDenied, ExecutionPermit, ExecutionPolicy,
+    ExecutionScope, HttpApiAuthorization, HttpAuthRejection, NoHttpAuth, PluginPackageOutput,
+    PolicyChanges, RunnerHooks,
 };
 pub use tenon_document::verified::{Flow, PluginInstance};
 pub use tenon_document::{ResourceLimits, VerifiedTenonDocument};
@@ -77,7 +78,7 @@ pub fn run_main() -> ExitCode {
 /// Runs this distribution with exactly one Runner-only initialization callback.
 ///
 /// The callback receives the fully validated, frozen configuration before Store
-/// recovery and returns both hooks. It is never called in a Pipeline subprocess.
+/// recovery and returns the three hooks. It is never called in a Pipeline subprocess.
 /// Initialization failures produce a non-zero exit code without opening the API.
 #[must_use]
 pub fn run_main_with(

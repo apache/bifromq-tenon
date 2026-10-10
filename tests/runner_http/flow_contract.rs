@@ -478,10 +478,7 @@ fn install_interfaces(address: std::net::SocketAddr) -> io::Result<()> {
             address,
             "POST",
             "/plugins",
-            &[(
-                "Content-Type",
-                "application/vnd.apache.tenon.plugin+tar+gzip",
-            )],
+            &[("Content-Type", "application/octet-stream")],
             &plugin_package(interface)?,
         )?;
         assert_eq!(response.status, 201, "{}", response.body_text());

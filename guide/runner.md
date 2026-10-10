@@ -51,7 +51,7 @@ The deadlines limit Pipeline startup, configuration updates and shutdown. If an 
 
 Give each Runner its own writable `stateDirectory`, protected from other writers. The Runner creates its state directories with mode `0700`; existing directories must have that mode and must not be symlinks. Modify Documents and installed packages through the HTTP API.
 
-Saved Documents and installed plugins survive restarts. A missing or damaged plugin leaves dependent Documents `unready`; reinstall the package to restore them. Invalid or unreadable saved Documents prevent startup. Back up configuration and installed packages with a consistent filesystem snapshot or while the Runner is stopped.
+Saved Documents and plugin packages survive restarts. Each startup reconstructs plugin runtime files from the saved packages. A missing package leaves dependent Documents `unready`. A saved package that fails access or validation checks stops startup and remains on disk. Invalid or unreadable saved Documents also prevent startup. Back up configuration and packages with a consistent filesystem snapshot or while the Runner is stopped. See [package storage and recovery](plugins.md#package-storage-and-recovery).
 
 In-flight messages, Lua state and timers do not survive restarts. Use upstream replay and downstream deduplication as required by your delivery policy.
 

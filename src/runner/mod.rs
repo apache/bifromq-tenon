@@ -48,7 +48,6 @@ use crate::metrics::{CoreProcess, MetricsRuntime};
 use executable::CapturedRunnerExecutable;
 use extensions::RunnerHooks;
 use main_loop::{RunnerMainLoop, RunnerMainLoopFailure, RunnerShutdownReport};
-use recovery::{RunnerRecoveryError, recover};
 use state_directory::{RunnerStateDirectoryError, prepare_runner_state_directory};
 use std::error::Error;
 use std::ffi::OsString;
@@ -108,8 +107,6 @@ fn run(
         CapturedRunnerExecutable::capture_current().map_err(RunnerStartupError::ExecutableImage)?;
     let state_layout = prepare_runner_state_directory(config.state_directory())
         .map_err(RunnerStartupError::StateDirectory)?;
-    let recovered = recover(&config, &state_layout, &hooks.document_protection)
-        .map_err(RunnerStartupError::Recovery)?;
     let runtime = runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -125,7 +122,6 @@ fn run(
             config,
             resources,
             state_layout,
-            recovered,
             executable_image,
             tls,
             hooks,
@@ -170,7 +166,6 @@ enum RunnerStartupError {
     ProcessResources(io::Error),
     MetricsIdentity(getrandom::Error),
     StateDirectory(RunnerStateDirectoryError),
-    Recovery(RunnerRecoveryError),
     ExecutableImage(io::Error),
     RuntimeInitialization(io::Error),
     ShutdownSignalRegistration(io::Error),
@@ -187,7 +182,6 @@ impl RunnerStartupError {
             Self::ProcessResources(_) => "runner.process_resources_initialization_failed",
             Self::MetricsIdentity(_) => "runner.metrics_identity_unavailable",
             Self::StateDirectory(error) => error.code(),
-            Self::Recovery(error) => error.code(),
             Self::ExecutableImage(_) => "runner.executable_image_unavailable",
             Self::RuntimeInitialization(_) => "runner.runtime_initialization_failed",
             Self::ShutdownSignalRegistration(_) => "runner.shutdown_signal_failed",
@@ -204,7 +198,6 @@ impl RunnerStartupError {
             | Self::ProcessResources(_)
             | Self::Tls(_)
             | Self::StateDirectory(_)
-            | Self::Recovery(_)
             | Self::ExecutableImage(_)
             | Self::RuntimeInitialization(_)
             | Self::ShutdownSignalRegistration(_)
@@ -222,7 +215,6 @@ impl RunnerStartupError {
             | Self::ProcessResources(_)
             | Self::Tls(_)
             | Self::StateDirectory(_)
-            | Self::Recovery(_)
             | Self::ExecutableImage(_)
             | Self::RuntimeInitialization(_)
             | Self::ShutdownSignalRegistration(_) => None,
@@ -246,7 +238,6 @@ impl fmt::Display for RunnerStartupError {
             }
             Self::Tls(_) => formatter.write_str("Runner HTTPS identity could not be initialized"),
             Self::StateDirectory(_) => formatter.write_str("Runner state directory setup failed"),
-            Self::Recovery(_) => formatter.write_str("Runner startup recovery failed"),
             Self::ExecutableImage(_) => {
                 formatter.write_str("Runner executable image could not be captured")
             }
@@ -271,7 +262,6 @@ impl Error for RunnerStartupError {
             Self::Tls(error) => Some(error),
             Self::MetricsIdentity(error) => Some(error),
             Self::StateDirectory(error) => Some(error),
-            Self::Recovery(error) => Some(error),
             Self::ExecutableImage(error)
             | Self::RuntimeInitialization(error)
             | Self::ShutdownSignalRegistration(error) => Some(error),

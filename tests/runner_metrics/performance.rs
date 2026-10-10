@@ -63,10 +63,7 @@ fn measure(mode: Mode, round: usize) -> io::Result<serde_json::Value> {
             address,
             "POST",
             "/plugins",
-            &[(
-                "Content-Type",
-                "application/vnd.apache.tenon.plugin+tar+gzip"
-            )],
+            &[("Content-Type", "application/octet-stream")],
             &plugin_package(PluginInterface::SourceAndSink)?
         )?
         .status,

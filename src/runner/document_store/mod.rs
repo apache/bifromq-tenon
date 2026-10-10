@@ -35,7 +35,7 @@
 //! external filesystem changes.
 
 use crate::identifiers::TenonDocumentId;
-use crate::runner::extensions::DocumentProtection;
+use crate::runner::extensions::ArtifactProtection;
 use sha2::{Digest as _, Sha256};
 use std::error::Error;
 use std::ffi::OsStr;
@@ -165,7 +165,7 @@ impl TenonDocumentStore {
     /// failure.
     pub(crate) fn sources(
         &self,
-        protection: Arc<dyn DocumentProtection>,
+        protection: Arc<dyn ArtifactProtection>,
     ) -> Result<
         impl Iterator<Item = Result<StoredTenonDocumentSource, TenonDocumentStoreError>> + use<>,
         TenonDocumentStoreError,
@@ -204,7 +204,7 @@ impl TenonDocumentStore {
         &self,
         document_id: &TenonDocumentId,
         source: &[u8],
-        protection: &dyn DocumentProtection,
+        protection: &dyn ArtifactProtection,
     ) -> Result<TenonDocumentEtag, TenonDocumentStoreError> {
         let id_sha256: [u8; SHA256_BYTES] = Sha256::digest(document_id.as_str().as_bytes()).into();
         let committed = self.directory.join(format!(
@@ -476,7 +476,7 @@ fn remove_temporary_entry(entry: &DirEntry) -> Result<(), TenonDocumentStoreErro
 
 fn read_source_entry(
     entry: DirEntry,
-    protection: &dyn DocumentProtection,
+    protection: &dyn ArtifactProtection,
 ) -> Result<StoredTenonDocumentSource, TenonDocumentStoreError> {
     let path = entry.path();
     let file_name = entry.file_name();

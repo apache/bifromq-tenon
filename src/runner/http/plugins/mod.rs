@@ -41,8 +41,6 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt as _;
 use utoipa::ToSchema;
 
-const PLUGIN_PACKAGE: &str = "application/vnd.apache.tenon.plugin+tar+gzip";
-
 /// The Program collection response: one summary per available Program.
 #[derive(Serialize, ToSchema)]
 struct ProgramListBody<'a> {
@@ -79,15 +77,17 @@ struct PluginInUseBody {
     post,
     path = "/plugins",
     tag = "plugins",
-    request_body(content = Vec<u8>, description = "A Plugin package (gzip-compressed tar)", content_type = "application/vnd.apache.tenon.plugin+tar+gzip"),
+    request_body(content(
+        (Vec<u8> = "application/octet-stream"),
+    ), description = "Plugin package bytes for the configured decoder"),
     responses(
         (status = 201, description = "Installed; the Location header holds the Program path"),
         (status = 204, description = "Unchanged; the Location header holds the Program path"),
         (status = 400, description = "The request body could not be read", body = ErrorEnvelope),
         (status = 409, description = "A different package already holds this version", body = ErrorEnvelope),
         (status = 413, description = "The package exceeds the size limit", body = ErrorEnvelope),
-        (status = 415, description = "The Content-Type is not the Plugin package media type", body = ErrorEnvelope),
-        (status = 422, description = "The package or its contracts are invalid, or the platform does not match", body = ErrorEnvelope),
+        (status = 415, description = "The Content-Type is not application/octet-stream", body = ErrorEnvelope),
+        (status = 422, description = "Package access was rejected, package validation failed, or the platform does not match", body = ErrorEnvelope),
         (status = 503, description = "Runner is shutting down", body = ErrorEnvelope),
     )
 )]
@@ -97,7 +97,7 @@ pub(super) async fn install_program(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if !has_content_type(&headers, PLUGIN_PACKAGE) {
+    if !has_content_type(&headers, "application/octet-stream") {
         return unsupported_media_type();
     }
     let Ok(upload) = state.management.begin_program_install().await else {

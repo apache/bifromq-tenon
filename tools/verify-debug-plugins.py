@@ -188,7 +188,7 @@ end
                         for bundle in bundles:
                             for expected in [201, 204]:
                                 status, _, body = request("POST", "/plugins", bundle.read_bytes(),
-                                    {"Content-Type": "application/vnd.apache.tenon.plugin+tar+gzip"})
+                                    {"Content-Type": "application/octet-stream"})
                                 assert status == expected, (status, body)
                         for identity, document in documents.items():
                             status, _, body = request("PUT", f"/documents/{identity}", json.dumps(document).encode(),

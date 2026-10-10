@@ -19,20 +19,25 @@
 
 //! A real distribution binary exercising only Tenon's public extension API.
 
+#[path = "runner_extensions/live_policy.rs"]
+mod live_policy;
+
 use axum::http::{HeaderMap, HeaderValue, Method};
 use serde_json::Value;
 use std::cell::Cell;
 use std::fs::{File, OpenOptions};
 use std::future::Future;
-use std::io::{self, Write};
+use std::io::{self, BufRead as _, Read, Write};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tenon::{
-    DocumentProtection, ExecutionDenied, ExecutionPermit, ExecutionPolicy, ExecutionScope,
-    HttpApiAuthorization, HttpAuthRejection, NoHttpAuth, RunnerHooks,
+    ArtifactProtection, ByPass, ExecutionDenied, ExecutionPermit, ExecutionPolicy, ExecutionScope,
+    HttpApiAuthorization, HttpAuthRejection, NoHttpAuth, PluginPackageOutput, PolicyChanges,
+    RunnerHooks,
 };
 
 fn main() -> ExitCode {
@@ -44,8 +49,15 @@ fn main() -> ExitCode {
         if let Some(marker) = extra.get("initializeMarker").and_then(Value::as_str) {
             File::create_new(marker)?;
         }
+        let live = extra
+            .get("policyFile")
+            .and_then(Value::as_str)
+            .map(|path| live_policy::LivePolicy::start(PathBuf::from(path)))
+            .transpose()?;
+        let package_state = live.as_ref().map(live_policy::LivePolicy::state);
         Ok(RunnerHooks::new(
             Policy {
+                live,
                 maximum_documents: extra.get("maximumDocuments").and_then(Value::as_u64),
                 maximum_authorizations: extra.get("maximumAuthorizations").and_then(Value::as_u64),
                 denied_document: extra
@@ -66,7 +78,14 @@ fn main() -> ExitCode {
                     .and_then(Value::as_u64)
                     .unwrap_or(1),
             },
-            Protection,
+            Protection {
+                package_state,
+                customer: extra
+                    .get("customer")
+                    .and_then(Value::as_str)
+                    .unwrap_or("customer-a")
+                    .to_owned(),
+            },
             HttpAuthorization {
                 enabled: extra
                     .get("httpAuth")
@@ -78,6 +97,7 @@ fn main() -> ExitCode {
 }
 
 struct Policy {
+    live: Option<live_policy::LivePolicy>,
     maximum_documents: Option<u64>,
     maximum_authorizations: Option<u64>,
     denied_document: Option<String>,
@@ -144,13 +164,62 @@ impl ExecutionPolicy for Policy {
                 entitlement_until,
             ));
         }
-        Ok(ExecutionPermit { entitlement_until })
+        match &self.live {
+            Some(live) => live.decision(),
+            None => Ok(ExecutionPermit { entitlement_until }),
+        }
+    }
+
+    fn changes(&self) -> Option<PolicyChanges> {
+        self.live.as_ref().map(live_policy::LivePolicy::changes)
     }
 }
 
-struct Protection;
+struct Protection {
+    package_state: Option<Arc<Mutex<live_policy::Snapshot>>>,
+    customer: String,
+}
 
-impl DocumentProtection for Protection {
+impl ArtifactProtection for Protection {
+    fn open_plugin_package(
+        &self,
+        source: &mut dyn Read,
+        output: &mut dyn PluginPackageOutput,
+    ) -> io::Result<()> {
+        let mut source = io::BufReader::new(source);
+        let prefix = if source.fill_buf()?.starts_with(b"fixture-package:") {
+            "fixture-package:"
+        } else if source.fill_buf()?.starts_with(b"fixture-files:") {
+            "fixture-files:"
+        } else {
+            return ByPass.open_plugin_package(&mut source, output);
+        };
+        let customer = match &self.package_state {
+            Some(state) => state
+                .lock()
+                .map_err(|_| io::Error::other("Fixture package state is unavailable"))?
+                .customer
+                .clone(),
+            None => self.customer.clone(),
+        };
+        let header = format!("{prefix}{customer}\n");
+        let mut actual = vec![0; header.len()];
+        source.read_exact(&mut actual)?;
+        if actual != header.as_bytes() {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
+        if prefix == "fixture-files:" {
+            let files: std::collections::BTreeMap<String, Vec<u8>> =
+                serde_json::from_reader(source)?;
+            for (path, bytes) in files {
+                output.write_file(&path, &mut bytes.as_slice())?;
+            }
+            Ok(())
+        } else {
+            ByPass.open_plugin_package(&mut DecodedPackage(source), output)
+        }
+    }
+
     fn protect(&self, source: &[u8], output: &mut dyn Write) -> io::Result<()> {
         output.write_all(b"fixture:")?;
         if source
@@ -176,6 +245,19 @@ impl DocumentProtection for Protection {
             output.write_all(&[byte ^ 0x80])?;
         }
         Ok(())
+    }
+}
+
+// This reversible test stream does not provide encryption.
+struct DecodedPackage<R>(R);
+
+impl<R: Read> Read for DecodedPackage<R> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let count = self.0.read(output)?;
+        for byte in &mut output[..count] {
+            *byte ^= 0x80;
+        }
+        Ok(count)
     }
 }
 
