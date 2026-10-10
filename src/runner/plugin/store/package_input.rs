@@ -29,8 +29,6 @@ use std::io::{self, Read, Seek as _, Write};
 use std::path::Path;
 use tempfile::NamedTempFile;
 
-pub(super) const MAX_PACKAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-
 /// Receives the full input into a temporary file under the Store root.
 ///
 /// # Errors
@@ -113,7 +111,6 @@ fn receive_into(
     directory: &Path,
 ) -> Result<(), PluginStoreError> {
     let mut buffer = [0_u8; 64 * 1024];
-    let mut remaining = MAX_PACKAGE_BYTES;
     loop {
         let count = input
             .read(&mut buffer)
@@ -123,12 +120,6 @@ fn receive_into(
         if count == 0 {
             return Ok(());
         }
-        remaining =
-            remaining
-                .checked_sub(count as u64)
-                .ok_or(PluginStoreError::PackageInvalid {
-                    source: PluginPackageError::PackageTooLarge,
-                })?;
         spool.write_all(&buffer[..count]).map_err(|source| {
             PluginStoreError::FilesystemOperationFailed {
                 path: directory.to_path_buf(),
@@ -204,24 +195,11 @@ mod tests {
     }
 
     #[test]
-    fn input_size_limit_accepts_the_boundary_and_rejects_the_next_byte() -> io::Result<()> {
+    fn input_above_eight_gib_is_read_to_the_end() -> io::Result<()> {
         let directory = tempfile::tempdir()?;
-        receive_into(
-            &mut io::repeat(0).take(MAX_PACKAGE_BYTES),
-            &mut io::sink(),
-            directory.path(),
-        )
-        .map_err(io::Error::other)?;
-        assert!(matches!(
-            receive_into(
-                &mut io::repeat(0).take(MAX_PACKAGE_BYTES + 1),
-                &mut io::sink(),
-                directory.path(),
-            ),
-            Err(PluginStoreError::PackageInvalid {
-                source: PluginPackageError::PackageTooLarge
-            })
-        ));
+        let mut input = io::repeat(0).take(8 * 1024 * 1024 * 1024 + 1);
+        receive_into(&mut input, &mut io::sink(), directory.path()).map_err(io::Error::other)?;
+        assert_eq!(input.limit(), 0);
         Ok(())
     }
 

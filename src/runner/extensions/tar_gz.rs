@@ -34,7 +34,7 @@ pub(super) fn open_tar_gz(
     package: &mut dyn Read,
     output: &mut dyn PluginPackageOutput,
 ) -> io::Result<()> {
-    let input = BufReader::new(BoundedReader::new(package, MAX_ARCHIVE_BYTES));
+    let input = BufReader::new(package);
     let gzip = GzDecoder::new(input);
     let bounded = BoundedReader::new(gzip, MAX_ARCHIVE_BYTES);
     let mut archive = Archive::new(bounded);

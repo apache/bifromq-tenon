@@ -45,7 +45,7 @@ GET returns original `application/jsonc` bytes and a strong ETag. Preserve the c
 
 DELETE of an existing Document requires the exact `If-Match` and returns `204` once the saved Document has been removed. An absent Document is an idempotent `204`. A successful save means the original bytes are durable and admitted; application proceeds separately. After a lost response, read the Document and compare bytes/ETags before deciding whether to retry. Do not blindly overwrite concurrent edits.
 
-The API imposes no total Document byte limit. Received plugin packages have an 8 GiB limit. All formats use the same [directory limits](plugins.md#package-structure). Deployment admission and resource controls must fit the environment. JSONC applies to Document/configuration input, while ordinary API responses are JSON. Schemas use `application/schema+json`; payload descriptors use `application/x-protobuf`.
+The API imposes no total Document byte limit. The API and Store impose no total byte limit on received plugin packages. All formats use the same [directory limits](plugins.md#package-structure). Deployment admission and resource controls must fit the environment. JSONC applies to Document/configuration input, while ordinary API responses are JSON. Schemas use `application/schema+json`; payload descriptors use `application/x-protobuf`.
 
 ## Runtime status
 

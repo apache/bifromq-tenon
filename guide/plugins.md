@@ -39,9 +39,9 @@ Package paths must be relative and canonical. Absolute paths, `.`/`..`, duplicat
 
 The standard generators produce `tar.gz` packages. The default package hook decodes this format. A custom hook can decode another format into the same directory contract. Upload every format with `Content-Type: application/octet-stream`.
 
-Received packages have an 8 GiB limit. Runtime contents have a 4 GiB total file limit and a 100,000-entry limit, including implicit directories. `manifest.json` and `config.schema.json` each have a 16 MiB limit. `payload.descriptor.pb` has a 64 MiB limit. Paths have a 4,096-byte limit; each component has a 255-byte limit.
+The core does not impose a total byte limit on received packages. Runtime contents have a 4 GiB total file limit and a 100,000-entry limit, including implicit directories. `manifest.json` and `config.schema.json` each have a 16 MiB limit. `payload.descriptor.pb` has a 64 MiB limit. Paths have a 4,096-byte limit; each component has a 255-byte limit.
 
-The default decoder also limits each compressed and decompressed archive stream to 8 GiB. It permits at most 100,000 tar entries. Each archive metadata record has a 64 KiB limit. Custom decoders must bound their format-specific work. The core applies directory limits to all formats.
+The default decoder limits the decompressed tar stream to 8 GiB. It does not impose a separate byte limit on compressed input. It permits at most 100,000 tar entries. Each archive metadata record has a 64 KiB limit. Custom decoders must bound their format-specific work. The core applies directory limits to all formats.
 
 The Runner executes `command` without a shell, with the extracted runtime directory as cwd. Bare executable names use the inherited PATH. Tenon appends its reserved `--sdk-config` argument; do not include it yourself. Use stdout and stderr for diagnostic text.
 

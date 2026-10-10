@@ -95,7 +95,7 @@ Lua scripts can transform or discard data, send to configured Sinks and reveal d
 
 Linux Document CPU and memory limits require delegated cgroup v2 support. On macOS, these limits are ignored and execution continues. Per-VM and per-Flow limits do not impose a total node budget. See [resource enforcement](guide/runner.md#cpu-and-memory). The supplied [Docker configuration](deploy/container/README.md) grants `CAP_SYS_ADMIN` for cgroup management. That broad capability is inherited by child programs; use trusted plugins and retain container security policies.
 
-The HTTP API has no total Document byte limit. Received packages have an 8 GiB limit. The core applies fixed directory limits to every package format. The default decoder has limits for gzip and tar processing. These limits do not control total upload concurrency, installed data size, or all management costs. The core has no built-in rate limit or execution quota per caller.
+The HTTP API has no total byte limit for a Document or a received plugin package. The core applies fixed directory limits to every package format. The default decoder keeps limits on the decompressed tar stream and tar entries. These limits do not control total upload concurrency, installed data size, or all management costs. The core has no built-in rate limit or execution quota per caller.
 
 Deployers must set request size, rate, connection, execution, disk, and resource limits for their environment. Protect the listener against network exhaustion. A TLS handshake deadline does not prevent all denial-of-service attacks.
 

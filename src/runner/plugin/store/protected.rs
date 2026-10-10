@@ -121,7 +121,6 @@ fn open_original(path: &Path) -> Result<File, PluginStoreError> {
     if !metadata.is_file()
         || metadata.permissions().mode() & 0o777 != 0o600
         || metadata.nlink() != 1
-        || metadata.len() > package_input::MAX_PACKAGE_BYTES
     {
         return Err(PluginStoreError::StoreIntegrityInvalid {
             path: path.to_path_buf(),
@@ -146,4 +145,19 @@ fn file_digest(file: &mut File) -> io::Result<[u8; 32]> {
     }
     file.rewind()?;
     Ok(digest.finalize().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_original_above_eight_gib_can_be_opened() -> io::Result<()> {
+        let original = tempfile::NamedTempFile::new()?;
+        let length = 8 * 1024 * 1024 * 1024 + 1;
+        original.as_file().set_len(length)?;
+        let file = open_original(original.path()).map_err(io::Error::other)?;
+        assert_eq!(file.metadata()?.len(), length);
+        Ok(())
+    }
 }
