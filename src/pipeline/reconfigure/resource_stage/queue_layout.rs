@@ -36,12 +36,12 @@ use crate::pipeline::reconfigure::PipelineReconfigureError;
 use crate::pipeline::reconfigure::plan::{CompiledResourceChanges, FlowChange, ResourceMutation};
 use crate::pipeline::reconfigure::revision::PipelineRevision;
 use crate::pipeline::reconfigure::runtime_files::{
-    INSTANCES_DIRECTORY_NAME, SINK_DIRECTORY_NAME, create_private_directory, create_queue,
-    egress_queue_path, ensure_bell_region_file, ensure_private_directory, flow_channel_bell_path,
-    flow_directory, instance_working_directory, loops_bell_path,
+    INSTANCES_DIRECTORY_NAME, SINK_DIRECTORY_NAME, create_bell_region_file,
+    create_private_directory, create_queue, egress_queue_path, ensure_private_directory,
+    flow_channel_bell_path, flow_directory, instance_working_directory, loops_bell_path,
 };
 use crate::pipeline::runtime::ChannelRuntimeSpec;
-use tenon_ipc::bell::BellRegion;
+use tenon_ipc::bell::{BellRegion, read_bell_region_epoch};
 use tenon_ipc::queue::QueueWriter;
 
 use super::directories::{CANDIDATE_DIRECTORY_NAME, ResourceDirectories};
@@ -82,18 +82,7 @@ pub(super) fn open_bell_region(path: &Path) -> Result<Arc<BellRegion>, PipelineR
     })
 }
 
-/// Resolves the Channel doorbell region of every Flow this batch binds routes to.
-///
-/// The Flow's Channels park in this region and the Flow's Source and Sinks ring
-/// it, so a batch that rebuilds the Flow's Queue layout passes the new Channel
-/// count and lets the Region file decide: the same count reuses the mapping the
-/// running Channels park in, and only a different count replaces it. A Queue
-/// header names the slot its waiting loop published, and that ordinal only means
-/// anything inside the mapping the loop published it into.
-///
-/// A Flow this batch re-routes without resizing keeps the region its running
-/// Channels already park in: only that Flow's Egress files moved, and the
-/// Channel count those slots are numbered by did not change.
+/// Opens retained Regions and creates only the Regions selected by the plan.
 fn channel_bell_regions(
     changes: &CompiledResourceChanges,
     environment: &PipelineEnvironment,
@@ -101,32 +90,39 @@ fn channel_bell_regions(
 ) -> Result<BTreeMap<FlowId, Arc<BellRegion>>, PipelineReconfigureError> {
     let mut regions = BTreeMap::new();
     for flow_id in changes.new_queue_flows() {
-        let slot_count = changes
-            .target
-            .document()
-            .channel_count(flow_id, environment.available_cpu_count());
-        let replacing_live_flow = changes.flows[flow_id] == FlowChange::ReplaceQueues;
-        // Retained Sink readers may still hold the live Bell Region mapping even
-        // when this Flow's Queue files are being replaced. Reuse that inode when
-        // the slot numbering remains compatible; renaming a candidate over it
-        // would leave the new Channel and retained Sink ringing different maps.
-        let reuse_live_region =
-            replacing_live_flow && !should_replace_channel_bell(changes, root, flow_id);
-        let region_root = if replacing_live_flow && !reuse_live_region {
-            root.join(CANDIDATE_DIRECTORY_NAME)
-        } else {
-            root.to_owned()
+        let live_path = flow_channel_bell_path(root, flow_id.as_str());
+        let path = match changes.flow_bells.get(flow_id) {
+            Some(mutation @ (ResourceMutation::Add | ResourceMutation::Replace)) => {
+                let replacing = *mutation == ResourceMutation::Replace;
+                let region_root = if replacing {
+                    root.join(CANDIDATE_DIRECTORY_NAME)
+                } else {
+                    root.to_owned()
+                };
+                if replacing {
+                    ensure_private_directory(
+                        &region_root.join(super::super::runtime_files::FLOWS_DIRECTORY_NAME),
+                    )?;
+                    create_private_directory(&flow_directory(&region_root, flow_id.as_str()))?;
+                }
+                let path = flow_channel_bell_path(&region_root, flow_id.as_str());
+                let slots = changes
+                    .target
+                    .document()
+                    .channel_count(flow_id, environment.available_cpu_count());
+                let epoch = if replacing {
+                    read_bell_region_epoch(&live_path)
+                        .unwrap_or(0)
+                        .saturating_add(1)
+                } else {
+                    1
+                };
+                create_bell_region_file(&path, slots, epoch)?;
+                path
+            }
+            None => live_path,
+            Some(ResourceMutation::Remove) => unreachable!("a removed Flow has no new Queues"),
         };
-        if replacing_live_flow && !reuse_live_region {
-            ensure_private_directory(
-                &root
-                    .join(CANDIDATE_DIRECTORY_NAME)
-                    .join(super::super::runtime_files::FLOWS_DIRECTORY_NAME),
-            )?;
-        }
-        ensure_private_directory(&flow_directory(&region_root, flow_id.as_str()))?;
-        let path = flow_channel_bell_path(&region_root, flow_id.as_str());
-        ensure_bell_region_file(&path, slot_count)?;
         regions.insert(flow_id.clone(), open_bell_region(&path)?);
     }
     for queue in &changes.egress_queues {
@@ -137,30 +133,6 @@ fn channel_bell_regions(
         regions.insert(queue.flow_id.clone(), open_bell_region(&path)?);
     }
     Ok(regions)
-}
-
-/// Returns whether a Flow replacement needs a new Channel Bell Region inode.
-///
-/// A retained Sink process may still hold the current live mapping. Equal slot
-/// counts keep every Queue header ordinal meaningful in that mapping, so the
-/// inode must be reused. A changed or malformed region is replaced only after
-/// all retained users that depend on its ordinals have been replaced.
-pub(super) fn should_replace_channel_bell(
-    changes: &CompiledResourceChanges,
-    root: &Path,
-    flow_id: &FlowId,
-) -> bool {
-    if changes.flows.get(flow_id) != Some(&FlowChange::ReplaceQueues) {
-        return false;
-    }
-    let target_slots = changes
-        .target
-        .document()
-        .channel_count(flow_id, changes.available_cpu_count);
-    let live_path = flow_channel_bell_path(root, flow_id.as_str());
-    BellRegion::open(&live_path)
-        .map(|region| region.slot_count() != target_slots)
-        .unwrap_or(true)
 }
 
 /// Returns every Sink Instance this batch binds Egress to.
@@ -179,53 +151,30 @@ pub(super) fn batch_sink_instances(
         .collect()
 }
 
-/// Creates the own-loop region of every Sink Instance these routes bind.
-///
-/// A Sink Instance runs one Egress loop over every Egress Queue it reads, so its
-/// region holds the single doorbell that loop parks on and each of those Queues
-/// publishes that same ordinal. A retained process keeps the region it already
-/// published into: its Queues did not move, so neither did the mapping those
-/// publications live in.
+/// A process replacement keeps the Sink Region that its Flow writers still use.
 fn create_sink_bell_regions(
     changes: &CompiledResourceChanges,
     root: &Path,
 ) -> Result<BTreeMap<PluginInstanceId, Arc<BellRegion>>, PipelineReconfigureError> {
-    let instances = root.join(INSTANCES_DIRECTORY_NAME);
-    let candidates = root.join(CANDIDATE_DIRECTORY_NAME);
     let mut regions = BTreeMap::new();
     for instance_id in batch_sink_instances(changes) {
-        // A retained process keeps the region it already published slots into;
-        // a launched process gets a fresh one, because those publications died
-        // with the mapping that held them.
-        let (path, launched) = match changes.process_mutation(&instance_id) {
-            // `begin_install` moves the candidate region onto the live name with
-            // the Egress Queues this Instance replaced.
-            Some(ResourceMutation::Replace) => {
-                let directory =
-                    instance_working_directory(&candidates, &instance_id).join(SINK_DIRECTORY_NAME);
-                (
-                    ensure_private_directory(&directory).map(|()| loops_bell_path(&directory))?,
-                    true,
-                )
-            }
+        let path = match changes.sink_bells.get(&instance_id) {
             Some(ResourceMutation::Add) => {
-                let directory =
-                    instance_working_directory(&instances, &instance_id).join(SINK_DIRECTORY_NAME);
-                (
-                    create_private_directory(&directory).map(|()| loops_bell_path(&directory))?,
-                    true,
-                )
+                let directory = staged_instance_directory(changes, root, &instance_id)
+                    .join(SINK_DIRECTORY_NAME);
+                create_private_directory(&directory)?;
+                let path = loops_bell_path(&directory);
+                create_bell_region_file(&path, SINK_SLOT_COUNT, 1)?;
+                path
             }
-            _ => (
-                loops_bell_path(
-                    &instance_working_directory(&instances, &instance_id).join(SINK_DIRECTORY_NAME),
-                ),
-                false,
+            None => loops_bell_path(
+                &instance_working_directory(&root.join(INSTANCES_DIRECTORY_NAME), &instance_id)
+                    .join(SINK_DIRECTORY_NAME),
             ),
+            Some(ResourceMutation::Replace | ResourceMutation::Remove) => {
+                unreachable!("a target Sink keeps its single-slot Region until removal")
+            }
         };
-        if launched {
-            ensure_bell_region_file(&path, SINK_SLOT_COUNT)?;
-        }
         regions.insert(instance_id, open_bell_region(&path)?);
     }
     Ok(regions)
@@ -246,24 +195,35 @@ fn stage_instance_directories(
     let target = &changes.target;
     let instances_directory = root.join(INSTANCES_DIRECTORY_NAME);
     for instance_id in changes.added_instances() {
-        working_directory.create_instance(&instance_working_directory(
+        working_directory.create_directory(&instance_working_directory(
             &instances_directory,
             instance_id,
         ))?;
     }
-    // Exactly the Instances whose Source or Sink directory this batch writes
-    // into and whose process is not already launching into its final directory.
+    for (flow_id, mutation) in &changes.flow_bells {
+        if *mutation == ResourceMutation::Add {
+            working_directory.create_directory(&flow_directory(root, flow_id.as_str()))?;
+        }
+    }
+    // Existing instances keep candidate files outside their active directories.
     let new_file_instances: BTreeSet<_> = changes
         .new_queue_flows()
         .map(|id| target.document().flows()[id].source().clone())
         .chain(
-            batch_sink_instances(changes)
-                .into_iter()
-                .filter(|id| changes.process_mutation(id) == Some(ResourceMutation::Replace)),
+            changes
+                .egress_queues
+                .iter()
+                .filter(|queue| queue.mutation != ResourceMutation::Remove)
+                .map(|queue| queue.instance_id.clone()),
         )
         .filter(|id| changes.process_mutation(id) != Some(ResourceMutation::Add))
         .collect();
-    if !new_file_instances.is_empty() {
+    if !new_file_instances.is_empty()
+        || changes
+            .flow_bells
+            .values()
+            .any(|mutation| *mutation == ResourceMutation::Replace)
+    {
         working_directory.create_candidate()?;
         for instance_id in new_file_instances {
             create_private_directory(&instance_working_directory(
@@ -366,10 +326,8 @@ fn prepare_egress_routes(
                         channel_index,
                     )) {
                         Some(writer) => PreparedEgressQueue::New(writer),
-                        // A retained Queue is opened only after the writer of the
-                        // retired generation has actually exited. Its peer region
-                        // is this batch's, so that a Sink launched by this batch
-                        // is woken in the mapping it publishes into.
+                        // A replacement writer opens the retained Queue after its
+                        // previous writer exits. Both use the retained Sink Region.
                         None => PreparedEgressQueue::Retained {
                             path: egress_queue_path(
                                 &instance_working_directory(&instances_directory, id),
@@ -421,10 +379,8 @@ pub(super) fn create_source_channels(
     let source_slot_count =
         NonZeroU32::new(SOURCE_LOOP_SLOT_COUNT).expect("the Source owns one slot per waiting loop");
     let source_bell_path = loops_bell_path(source_directory);
-    // The Source that publishes into this region is being launched into a
-    // directory this batch staged, so a region already at its final slot count
-    // is one no live Source loop can be parked on and is reused as is.
-    ensure_bell_region_file(&source_bell_path, source_slot_count)?;
+    // The Source Region and all its Queue pairs have the same lifetime.
+    create_bell_region_file(&source_bell_path, source_slot_count, 1)?;
     let source_region = open_bell_region(&source_bell_path)?;
     let submission_capacity = submission_capacity(max_pending_records, max_record_bytes)
         .expect("Runner verifies every Flow's Queue capacity");

@@ -152,6 +152,9 @@ fn parallelism_replaces_its_process_existing_stream_and_adds_new_channel() -> Te
             ResourceAction::Replace(RuntimeResourceIdentity::PluginProcess {
                 instance_id: instance_id("source-a")?,
             }),
+            ResourceAction::Replace(RuntimeResourceIdentity::FlowBellRegion {
+                flow_id: flow_id("telemetry")?
+            }),
             ResourceAction::Replace(RuntimeResourceIdentity::SourceQueuePair {
                 flow_id: flow_id("telemetry")?,
                 channel_index: 0,
@@ -306,6 +309,15 @@ fn adding_a_whole_flow_adds_only_its_exclusive_instances_and_flow_resources() ->
             ResourceAction::Add(RuntimeResourceIdentity::PluginProcess {
                 instance_id: instance_id("source-b")?,
             }),
+            ResourceAction::Add(RuntimeResourceIdentity::SinkBellRegion {
+                instance_id: instance_id("archive")?
+            }),
+            ResourceAction::Add(RuntimeResourceIdentity::SinkBellRegion {
+                instance_id: instance_id("output-b")?
+            }),
+            ResourceAction::Add(RuntimeResourceIdentity::FlowBellRegion {
+                flow_id: flow_id("audit")?
+            }),
             ResourceAction::Add(RuntimeResourceIdentity::SourceQueuePair {
                 flow_id: flow_id("audit")?,
                 channel_index: 0,
@@ -373,6 +385,15 @@ fn removing_a_whole_flow_removes_only_its_exclusive_instances_and_flow_resources
             }),
             ResourceAction::Remove(RuntimeResourceIdentity::PluginProcess {
                 instance_id: instance_id("source-b")?,
+            }),
+            ResourceAction::Remove(RuntimeResourceIdentity::SinkBellRegion {
+                instance_id: instance_id("archive")?
+            }),
+            ResourceAction::Remove(RuntimeResourceIdentity::SinkBellRegion {
+                instance_id: instance_id("output-b")?
+            }),
+            ResourceAction::Remove(RuntimeResourceIdentity::FlowBellRegion {
+                flow_id: flow_id("audit")?
             }),
             ResourceAction::Remove(RuntimeResourceIdentity::SourceQueuePair {
                 flow_id: flow_id("audit")?,
@@ -882,18 +903,20 @@ fn flow_identity_change_replaces_its_source_process_and_flow_resources() -> Test
     rename_flow(&mut renamed_flow, "telemetry", "telemetry-v2")?;
     let actions =
         ReconfigurePlan::derive(Some(&current), model(renamed_flow)?, AVAILABLE_CPU_COUNT)?;
-    assert_eq!(actions.actions.len(), 10);
+    assert_eq!(actions.actions.len(), 12);
     assert!(
         actions
             .actions
             .iter()
             .all(|action| match action_identity(action) {
-                RuntimeResourceIdentityRef::SourceQueuePair { flow_id, .. }
+                RuntimeResourceIdentityRef::FlowBellRegion { flow_id }
+                | RuntimeResourceIdentityRef::SourceQueuePair { flow_id, .. }
                 | RuntimeResourceIdentityRef::FlowChannel { flow_id, .. }
                 | RuntimeResourceIdentityRef::FlowRoute { flow_id, .. } => {
                     matches!(flow_id.as_str(), "telemetry" | "telemetry-v2")
                 }
-                RuntimeResourceIdentityRef::PluginProcess { instance_id } => {
+                RuntimeResourceIdentityRef::PluginProcess { instance_id }
+                | RuntimeResourceIdentityRef::SinkBellRegion { instance_id } => {
                     matches!(instance_id.as_str(), "source-a" | "output-a")
                 }
                 RuntimeResourceIdentityRef::EgressQueue {
@@ -932,6 +955,12 @@ fn sink_instance_identity_change_moves_only_its_process_queues_and_route() -> Te
             }),
             ResourceAction::Add(RuntimeResourceIdentity::PluginProcess {
                 instance_id: instance_id("output-c")?,
+            }),
+            ResourceAction::Remove(RuntimeResourceIdentity::SinkBellRegion {
+                instance_id: instance_id("output-a")?
+            }),
+            ResourceAction::Add(RuntimeResourceIdentity::SinkBellRegion {
+                instance_id: instance_id("output-c")?
             }),
             ResourceAction::Remove(RuntimeResourceIdentity::EgressQueue {
                 instance_id: instance_id("output-a")?,
@@ -1098,6 +1127,12 @@ fn action_identity(action: &ResourceAction) -> RuntimeResourceIdentityRef<'_> {
     match identity {
         RuntimeResourceIdentity::PluginProcess { instance_id } => {
             RuntimeResourceIdentityRef::PluginProcess { instance_id }
+        }
+        RuntimeResourceIdentity::SinkBellRegion { instance_id } => {
+            RuntimeResourceIdentityRef::SinkBellRegion { instance_id }
+        }
+        RuntimeResourceIdentity::FlowBellRegion { flow_id } => {
+            RuntimeResourceIdentityRef::FlowBellRegion { flow_id }
         }
         RuntimeResourceIdentity::SourceQueuePair {
             flow_id,

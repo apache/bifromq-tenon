@@ -20,7 +20,6 @@
 //! Owns the private working-directory and Queue-file layout.
 
 use std::fs::DirBuilder;
-use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -31,7 +30,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::error::PipelineReconfigureError;
 use crate::identifiers::PluginInstanceId;
-use tenon_ipc::bell::{BellRegion, create_bell_region, read_bell_region_epoch};
+use tenon_ipc::bell::create_bell_region;
 use tenon_ipc::queue::{DataCapacity, create_queue_file};
 
 pub(crate) const SOURCE_DIRECTORY_NAME: &str = "source";
@@ -124,44 +123,13 @@ pub(crate) fn loops_bell_path(side_directory: &Path) -> PathBuf {
     side_directory.join(LOOPS_BELL_FILE_NAME)
 }
 
-/// Ensures the Bell Region at one final path holds exactly `slot_count` slots.
-///
-/// A Region is named by the loop layout that numbers its slots, so an existing
-/// Region already holding this many slots is reused unchanged. Reuse is what
-/// keeps every peer that mapped the Region earlier ringing the slots the loops
-/// it was bound to still park in; replacing it would leave those peers writing
-/// a mapping no loop waits on. Only a different slot count — a different Channel
-/// count — replaces it, and so does a path this process cannot open as a Region,
-/// because a mapping that cannot be opened holds no live loop.
-///
-/// A replaced region keeps a nondecreasing diagnostic epoch, saturating at the
-/// maximum value so diagnostic metadata can never prevent rebuilding a Region.
-///
-/// # Errors
-///
-/// Returns [`PipelineReconfigureError::BellRegionRemove`] when an earlier region
-/// cannot be removed, or [`PipelineReconfigureError::BellRegionCreate`] when the
-/// new region cannot be created or initialized.
-pub(super) fn ensure_bell_region_file(
+/// Creates a new Region at a path owned by this resource batch.
+/// An existing file is an error; only the plan can select a replacement.
+pub(super) fn create_bell_region_file(
     path: &Path,
     slot_count: NonZeroU32,
+    epoch: u64,
 ) -> Result<(), PipelineReconfigureError> {
-    if let Ok(existing) = BellRegion::open(path)
-        && existing.slot_count() == slot_count
-    {
-        return Ok(());
-    }
-    let epoch = read_bell_region_epoch(path).unwrap_or(0).saturating_add(1);
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(PipelineReconfigureError::BellRegionRemove {
-                path: path.to_owned(),
-                source,
-            });
-        }
-    }
     create_bell_region(path, slot_count, epoch).map_err(|source| {
         PipelineReconfigureError::BellRegionCreate {
             path: path.to_owned(),
@@ -187,27 +155,4 @@ pub(crate) fn egress_queue_path(
         .join(SINK_DIRECTORY_NAME)
         .join(identity_directory_name(flow_id))
         .join(format!("egress-{channel_id}.queue"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_maximum_diagnostic_epoch_does_not_block_region_reuse_or_replacement()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("loops.bells");
-        let one = NonZeroU32::new(1).ok_or("one slot is nonzero")?;
-        let two = NonZeroU32::new(2).ok_or("two slots are nonzero")?;
-        create_bell_region(&path, one, u64::MAX)?;
-        let original = std::fs::read(&path)?;
-
-        ensure_bell_region_file(&path, one)?;
-        assert_eq!(std::fs::read(&path)?, original);
-        ensure_bell_region_file(&path, two)?;
-        assert_eq!(BellRegion::open(&path)?.slot_count(), two);
-        assert_eq!(read_bell_region_epoch(&path), Some(u64::MAX));
-        Ok(())
-    }
 }

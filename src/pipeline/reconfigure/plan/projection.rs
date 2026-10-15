@@ -45,6 +45,13 @@ pub(super) enum RuntimeResourceSpec<'a> {
         source_layout: Option<FlowQueueLayout<'a>>,
         sink_layout: Rc<[FlowQueueLayout<'a>]>,
     },
+    SinkBellRegion {
+        instance_id: &'a PluginInstanceId,
+    },
+    FlowBellRegion {
+        flow_id: &'a FlowId,
+        slot_count: NonZeroU32,
+    },
     SourceQueuePair {
         channel_index: u32,
         flow: Rc<FlowMaterial<'a>>,
@@ -71,6 +78,12 @@ impl RuntimeResourceSpec<'_> {
         match self {
             Self::PluginProcess { instance_id, .. } => {
                 RuntimeResourceIdentityRef::PluginProcess { instance_id }
+            }
+            Self::SinkBellRegion { instance_id } => {
+                RuntimeResourceIdentityRef::SinkBellRegion { instance_id }
+            }
+            Self::FlowBellRegion { flow_id, .. } => {
+                RuntimeResourceIdentityRef::FlowBellRegion { flow_id }
             }
             Self::SourceQueuePair {
                 channel_index,
@@ -108,6 +121,18 @@ impl RuntimeResourceSpec<'_> {
 
     pub(super) fn has_same_material(&self, other: &Self) -> bool {
         match self {
+            // A Sink has one waiting loop, independent of its process and Queues.
+            Self::SinkBellRegion { .. } => true,
+            Self::FlowBellRegion { slot_count, .. } => {
+                let Self::FlowBellRegion {
+                    slot_count: other_slots,
+                    ..
+                } = other
+                else {
+                    unreachable!("equal resource identities must have the same resource kind")
+                };
+                slot_count == other_slots
+            }
             Self::PluginProcess {
                 instance,
                 source_layout,
@@ -294,10 +319,13 @@ pub(super) fn project_runtime_resources(
         .plugin_instances()
         .len()
         .checked_add(
-            queue_count
-                .checked_mul(2)
-                .ok_or(PipelineReconfigureError::ResourceLimitExceeded)?,
+            instances
+                .values()
+                .filter(|instance| !instance.sink_layout.is_empty())
+                .count(),
         )
+        .and_then(|count| count.checked_add(flows.len()))
+        .and_then(|count| count.checked_add(queue_count.checked_mul(2)?))
         .and_then(|count| count.checked_add(egress_queue_count))
         .and_then(|count| count.checked_add(route_count))
         .ok_or(PipelineReconfigureError::ResourceLimitExceeded)?;
@@ -313,6 +341,20 @@ pub(super) fn project_runtime_resources(
             instance: instance.instance,
             source_layout: instance.source_layout,
             sink_layout: Rc::clone(&instance.sink_layout),
+        });
+    }
+    for instance_id in model.document().plugin_instances().keys() {
+        if !instance_projection(&instances, instance_id)
+            .sink_layout
+            .is_empty()
+        {
+            resources.push(RuntimeResourceSpec::SinkBellRegion { instance_id });
+        }
+    }
+    for flow in &flows {
+        resources.push(RuntimeResourceSpec::FlowBellRegion {
+            flow_id: flow.flow_id,
+            slot_count: flow.parallelism,
         });
     }
     for flow in &flows {

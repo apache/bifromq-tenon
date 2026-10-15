@@ -78,10 +78,6 @@ pub(crate) enum PipelineReconfigureError {
         path: PathBuf,
         source: BellError,
     },
-    BellRegionRemove {
-        path: PathBuf,
-        source: io::Error,
-    },
     RuntimeStart(PipelineRuntimeError),
     RuntimeTransition(Box<PipelineRuntimeError>),
     PluginInstanceLifecycle(PluginInstanceError),
@@ -217,13 +213,6 @@ impl fmt::Display for PipelineReconfigureError {
                     path.display()
                 )
             }
-            Self::BellRegionRemove { path, .. } => {
-                write!(
-                    formatter,
-                    "Pipeline Bell Region could not be removed: {}",
-                    path.display()
-                )
-            }
             Self::RuntimeStart(_) => {
                 formatter.write_str("Pipeline data plane could not be started")
             }
@@ -254,7 +243,6 @@ impl Error for PipelineReconfigureError {
             Self::QueueCreate { source, .. } | Self::QueueOpen { source, .. } => Some(source),
             Self::BellRegionCreate { source, .. } => Some(source),
             Self::BellRegionOpen { source, .. } => Some(source),
-            Self::BellRegionRemove { source, .. } => Some(source),
             Self::QueueRename { source, .. } | Self::QueueRemove { source, .. } => Some(source),
             Self::RuntimeStart(source) => Some(source),
             Self::RuntimeTransition(source) => Some(source.as_ref()),

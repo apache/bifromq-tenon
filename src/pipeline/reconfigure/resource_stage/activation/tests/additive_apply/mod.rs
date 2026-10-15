@@ -25,6 +25,7 @@ use crate::pipeline::reconfigure::PipelineApplyOutcome;
 use crate::pipeline::reconfigure::plan::tests::{flow, instance};
 use serde_json::{Value, json};
 
+mod bell_lifecycle;
 mod configuration_handoff;
 mod deadline;
 mod during_apply;

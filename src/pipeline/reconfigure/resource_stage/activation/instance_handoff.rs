@@ -478,10 +478,11 @@ impl PipelineReconfigurer {
         id: &PluginInstanceId,
     ) -> bool {
         let changes = &started.staged.changes;
-        if changes
-            .egress_queues
-            .iter()
-            .any(|queue| &queue.instance_id == id)
+        if changes.sink_bells.contains_key(id)
+            || changes
+                .egress_queues
+                .iter()
+                .any(|queue| &queue.instance_id == id)
         {
             return false;
         }

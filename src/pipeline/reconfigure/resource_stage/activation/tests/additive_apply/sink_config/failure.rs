@@ -64,6 +64,11 @@ async fn failed_added_stage_keeps_old_sink_config_process_and_lua() -> TestResul
                     .exists()
             );
             assert!(!instance_directory(root, "added-input")?.exists());
+            assert!(
+                !crate::pipeline::reconfigure::runtime_files::flow_directory(root, "added-flow")
+                    .exists()
+            );
+            assert!(!root.join(".candidate").exists());
             assert!(matches!(sink.try_read()?, ReadOutcome::Empty));
             submit(&mut source, 2)?;
             assert_eq!(read_value(&mut sink).await?, "stable:2");

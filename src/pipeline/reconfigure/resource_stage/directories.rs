@@ -24,7 +24,6 @@ use super::super::runtime_files::{
     enforce_private_directory_permissions, flow_directory, instance_working_directory,
     loops_bell_path,
 };
-use super::queue_layout::{batch_sink_instances, should_replace_channel_bell};
 use crate::pipeline::reconfigure::PipelineReconfigureError;
 use crate::pipeline::reconfigure::operation::{
     BlockingReconfigureJob, spawn_blocking_reconfigure_work,
@@ -61,19 +60,6 @@ impl ResourceDirectories {
     ) -> BlockingReconfigureJob<()> {
         let root = self.path().to_owned();
         let instances = root.join(INSTANCES_DIRECTORY_NAME);
-        let current_sinks: BTreeSet<_> = current
-            .document()
-            .flows()
-            .values()
-            .flat_map(|flow| flow.sinks())
-            .collect();
-        let target_sinks: BTreeSet<_> = changes
-            .target
-            .document()
-            .flows()
-            .values()
-            .flat_map(|flow| flow.sinks())
-            .collect();
         let old_sources: BTreeSet<_> = changes
             .flows
             .iter()
@@ -118,16 +104,11 @@ impl ResourceDirectories {
                 .to_owned()
             })
             .collect();
-        let removed_sink_directories: BTreeSet<_> = changes
-            .egress_queues
+        let removed_sink_directories: Vec<_> = changes
+            .sink_bells
             .iter()
-            .filter(|queue| {
-                queue.mutation == ResourceMutation::Remove
-                    && !target_sinks.contains(&queue.instance_id)
-            })
-            .map(|queue| {
-                instance_working_directory(&instances, &queue.instance_id).join(SINK_DIRECTORY_NAME)
-            })
+            .filter(|(_, mutation)| **mutation == ResourceMutation::Remove)
+            .map(|(id, _)| instance_working_directory(&instances, id).join(SINK_DIRECTORY_NAME))
             .collect();
         let removed_instances: Vec<_> = changes
             .processes
@@ -135,23 +116,16 @@ impl ResourceDirectories {
             .filter(|(_, mutation)| *mutation == ResourceMutation::Remove)
             .map(|(id, _)| instance_working_directory(&instances, id))
             .collect();
-        // A removed Flow owns no Channel doorbell any more. A replaced Flow
-        // keeps its live Bell Region when retained peers still use the same
-        // slot numbering; only an incompatible region is removed below after
-        // the retired generation has released its mapping.
         let removed_shared_flow_directories: Vec<_> = changes
-            .flows
+            .flow_bells
             .iter()
-            .filter(|(_, change)| matches!(change, FlowChange::Remove))
+            .filter(|(_, mutation)| **mutation == ResourceMutation::Remove)
             .map(|(id, _)| flow_directory(&root, id.as_str()))
             .collect();
         let replaced_shared_flow_bells: Vec<_> = changes
-            .flows
+            .flow_bells
             .iter()
-            .filter(|(id, change)| {
-                matches!(change, FlowChange::ReplaceQueues)
-                    && should_replace_channel_bell(changes, &root, id)
-            })
+            .filter(|(_, mutation)| **mutation == ResourceMutation::Replace)
             .map(|(id, _)| super::super::runtime_files::flow_channel_bell_path(&root, id.as_str()))
             .collect();
         let mut replacements: Vec<_> = changes
@@ -188,7 +162,7 @@ impl ResourceDirectories {
                 queue.flow_id.as_str(),
                 queue.channel_index,
             );
-            if !current_sinks.contains(&queue.instance_id) {
+            if changes.sink_bells.get(&queue.instance_id) == Some(&ResourceMutation::Add) {
                 new_sink_directories.insert(instance_directory.join(SINK_DIRECTORY_NAME));
             }
             if !current
@@ -202,15 +176,14 @@ impl ResourceDirectories {
             }
             replacements.push((from, to));
         }
-        // A replaced Flow gets a new Channel Bell Region in the candidate
-        // tree. Install it only after the old Channel generation has retired;
-        // changing the live pathname during staging would leave old mmaps and
-        // the new Queue headers referring to different Region inodes.
+        // Only a changed Channel count replaces a Flow Region. All users of
+        // the old layout have joined before these files are installed.
         replacements.extend(
             changes
-                .new_queue_flows()
-                .filter(|id| should_replace_channel_bell(changes, &root, id))
-                .map(|id| {
+                .flow_bells
+                .iter()
+                .filter(|(_, mutation)| **mutation == ResourceMutation::Replace)
+                .map(|(id, _)| {
                     (
                         super::super::runtime_files::flow_channel_bell_path(
                             &root.join(CANDIDATE_DIRECTORY_NAME),
@@ -220,23 +193,26 @@ impl ResourceDirectories {
                     )
                 }),
         );
-        // A replaced Sink Instance gained a fresh own-loop region in the
-        // candidate directory, because the slots its retired generation
-        // published died with the mapping that held them. Its Queues did not
-        // move, so only the region file takes the live name.
+        // An existing instance can gain a Sink interface. A process replacement
+        // alone never replaces the Region used by retained Flow writers.
         replacements.extend(
-            batch_sink_instances(changes)
-                .into_iter()
-                .filter(|id| changes.process_mutation(id) == Some(ResourceMutation::Replace))
-                .map(|id| {
-                    let from = loops_bell_path(
-                        &instance_working_directory(&root.join(CANDIDATE_DIRECTORY_NAME), &id)
-                            .join(SINK_DIRECTORY_NAME),
-                    );
-                    let to = loops_bell_path(
-                        &instance_working_directory(&instances, &id).join(SINK_DIRECTORY_NAME),
-                    );
-                    (from, to)
+            changes
+                .sink_bells
+                .iter()
+                .filter(|(id, mutation)| {
+                    **mutation == ResourceMutation::Add
+                        && changes.process_mutation(id) != Some(ResourceMutation::Add)
+                })
+                .map(|(id, _)| {
+                    (
+                        loops_bell_path(
+                            &instance_working_directory(&root.join(CANDIDATE_DIRECTORY_NAME), id)
+                                .join(SINK_DIRECTORY_NAME),
+                        ),
+                        loops_bell_path(
+                            &instance_working_directory(&instances, id).join(SINK_DIRECTORY_NAME),
+                        ),
+                    )
                 }),
         );
         let candidate = match self {
@@ -304,7 +280,7 @@ impl ResourceDirectories {
         }
     }
 
-    pub(super) fn create_instance(&mut self, path: &Path) -> Result<(), PipelineReconfigureError> {
+    pub(super) fn create_directory(&mut self, path: &Path) -> Result<(), PipelineReconfigureError> {
         let directory = OwnedDirectory::create(path)?;
         match self {
             Self::Root(_) => directory.release(),

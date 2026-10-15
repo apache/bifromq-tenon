@@ -86,6 +86,8 @@ impl ReconfigurePlan {
             target: self.target,
             available_cpu_count: self.available_cpu_count,
             processes: Vec::new(),
+            sink_bells: BTreeMap::new(),
+            flow_bells: BTreeMap::new(),
             flows: BTreeMap::new(),
             egress_queues: Vec::new(),
         };
@@ -102,6 +104,12 @@ impl ReconfigurePlan {
                         .try_reserve(1)
                         .map_err(|_| PipelineReconfigureError::ResourceLimitExceeded)?;
                     changes.processes.push((instance_id, mutation));
+                }
+                RuntimeResourceIdentity::SinkBellRegion { instance_id } => {
+                    changes.sink_bells.insert(instance_id, mutation);
+                }
+                RuntimeResourceIdentity::FlowBellRegion { flow_id } => {
+                    changes.flow_bells.insert(flow_id, mutation);
                 }
                 RuntimeResourceIdentity::SourceQueuePair {
                     flow_id,
@@ -177,6 +185,8 @@ pub(super) struct CompiledResourceChanges {
     pub(super) target: PipelineRevision,
     pub(super) available_cpu_count: NonZeroUsize,
     pub(super) processes: Vec<(PluginInstanceId, ResourceMutation)>,
+    pub(super) sink_bells: BTreeMap<PluginInstanceId, ResourceMutation>,
+    pub(super) flow_bells: BTreeMap<FlowId, ResourceMutation>,
     pub(super) flows: BTreeMap<FlowId, FlowChange>,
     pub(super) egress_queues: Vec<EgressQueueChange>,
 }

@@ -45,7 +45,7 @@ use prost::Message as _;
 use serde_json::{Value, json};
 use std::error::Error;
 use std::io;
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -100,6 +100,12 @@ fn stage_replacements_use_separate_files_and_leave_active_interfaces_unchanged()
         .build()?
         .block_on(runtime.bind())?;
     let current = (runtime.activate(), working_directory, changes);
+    let region_path = flow_channel_bell_path(&root, "a-to-b");
+    // Epoch is diagnostic data. Its largest value must not block replacement.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&region_path)?
+        .write_all_at(&u64::MAX.to_le_bytes(), 16)?;
     let gateway = instance_directory(&root.join(INSTANCES_DIRECTORY_NAME), "gateway-a")?;
     let source = gateway.join(SOURCE_DIRECTORY_NAME);
     let old_names = directory_names(&source)?;
@@ -147,6 +153,17 @@ fn stage_replacements_use_separate_files_and_leave_active_interfaces_unchanged()
     assert_eq!(
         directory_tree(&root.join(CANDIDATE_DIRECTORY_NAME))?,
         replacement_candidate_tree()
+    );
+    assert_eq!(
+        tenon_ipc::bell::read_bell_region_epoch(&region_path),
+        Some(u64::MAX)
+    );
+    assert_eq!(
+        tenon_ipc::bell::read_bell_region_epoch(&flow_channel_bell_path(
+            &root.join(CANDIDATE_DIRECTORY_NAME),
+            "a-to-b"
+        )),
+        Some(u64::MAX)
     );
     drop(staged);
     assert_eq!(
@@ -1028,7 +1045,6 @@ fn replacement_candidate_tree() -> Vec<String> {
     for instance in [ARCHIVE_DIRECTORY_NAME, GATEWAY_B_DIRECTORY_NAME] {
         expected.push(String::from(instance));
         expected.push(format!("{instance}/sink"));
-        expected.push(format!("{instance}/sink/loops.bells"));
         expected.push(format!("{instance}/sink/{A_TO_B_DIRECTORY_NAME}"));
         expected.push(format!(
             "{instance}/sink/{A_TO_B_DIRECTORY_NAME}/egress-2.queue"

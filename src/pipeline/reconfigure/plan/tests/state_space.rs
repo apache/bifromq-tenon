@@ -47,6 +47,8 @@ struct Scenario {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Resource {
     Process(String),
+    SinkBell(String),
+    FlowBell(String),
     SourceQueue(String, u32),
     Channel(String, u32),
     EgressQueue(String, String, u32),
@@ -135,6 +137,18 @@ fn all_128_scenarios_and_every_transition_match_an_independent_resource_model() 
                         normalize_mutation(*mutation),
                     )
                 })
+                .chain(compiled.sink_bells.iter().map(|(id, mutation)| {
+                    (
+                        Resource::SinkBell(id.as_str().to_owned()),
+                        normalize_mutation(*mutation),
+                    )
+                }))
+                .chain(compiled.flow_bells.iter().map(|(id, mutation)| {
+                    (
+                        Resource::FlowBell(id.as_str().to_owned()),
+                        normalize_mutation(*mutation),
+                    )
+                }))
                 .chain(compiled.egress_queues.iter().map(|queue| {
                     (
                         Resource::EgressQueue(
@@ -152,7 +166,10 @@ fn all_128_scenarios_and_every_transition_match_an_independent_resource_model() 
                 .filter(|(resource, _)| {
                     matches!(
                         resource,
-                        Resource::Process(_) | Resource::EgressQueue(_, _, _)
+                        Resource::Process(_)
+                            | Resource::SinkBell(_)
+                            | Resource::FlowBell(_)
+                            | Resource::EgressQueue(_, _, _)
                     )
                 })
                 .collect();
@@ -406,6 +423,10 @@ impl Scenario {
             } else {
                 2
             };
+            resources.insert(Resource::FlowBell(id.clone()), json!(count));
+            for target in self.targets(&id) {
+                resources.insert(Resource::SinkBell(target.into()), json!(1));
+            }
             for index in 0..count {
                 for target in self.targets(&id) {
                     resources.insert(
@@ -510,6 +531,12 @@ fn normalize_action(action: &ResourceAction) -> (Resource, Mutation) {
     let resource = match id {
         RuntimeResourceIdentity::PluginProcess { instance_id } => {
             Resource::Process(instance_id.as_str().to_owned())
+        }
+        RuntimeResourceIdentity::SinkBellRegion { instance_id } => {
+            Resource::SinkBell(instance_id.as_str().to_owned())
+        }
+        RuntimeResourceIdentity::FlowBellRegion { flow_id } => {
+            Resource::FlowBell(flow_id.as_str().to_owned())
         }
         RuntimeResourceIdentity::SourceQueuePair {
             flow_id,

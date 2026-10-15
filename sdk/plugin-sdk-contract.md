@@ -110,6 +110,14 @@ A Channel's Bell Region is supplied by `sourceChannelRegion` or `channelBellPath
 
 Each endpoint binds its own slot through the IPC protocol; peers read the published ordinal to notify it. Many Queues may subscribe to the same loop. That loop must recheck every subscribed Queue and its local events before sleeping. Files, permissions, endpoint replacement, and final deletion remain Pipeline responsibilities; the SDK never creates or repairs them.
 
+Pipeline owns Bell Region lifetimes separately from process lifetimes:
+
+- A Sink keeps the same Region while at least one Flow uses that Instance as a Sink. Configuration changes, process restarts, and changes to its input Queues do not replace that Region.
+- A Flow keeps its Channel Region while its Channel count stays the same. A different Channel count requires a new Region. Pipeline stops all users of the old Channel layout before it installs the new Region.
+- A Source keeps its loop Region with its Submission and Completion Queues. Pipeline replaces that Region only when it replaces the complete Source Queue set.
+
+A replacement process binds its slots after the previous process exits. It uses the existing Region without resetting its slots. The normal condition recheck detects pending Queue data. Pipeline removes a Region only after all its users stop. Stage cancellation removes only new files owned by that candidate.
+
 ### 2.3 Control connection and phases
 
 Invalid startup material fails before business Queues open or business entry points start. Partial parsing is never passed to the business factory.

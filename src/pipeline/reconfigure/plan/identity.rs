@@ -28,6 +28,12 @@ pub(in crate::pipeline::reconfigure) enum RuntimeResourceIdentity {
     PluginProcess {
         instance_id: PluginInstanceId,
     },
+    SinkBellRegion {
+        instance_id: PluginInstanceId,
+    },
+    FlowBellRegion {
+        flow_id: FlowId,
+    },
     SourceQueuePair {
         flow_id: FlowId,
         channel_index: u32,
@@ -53,6 +59,12 @@ pub(super) enum RuntimeResourceIdentityRef<'a> {
     PluginProcess {
         instance_id: &'a PluginInstanceId,
     },
+    SinkBellRegion {
+        instance_id: &'a PluginInstanceId,
+    },
+    FlowBellRegion {
+        flow_id: &'a FlowId,
+    },
     SourceQueuePair {
         flow_id: &'a FlowId,
         channel_index: u32,
@@ -77,6 +89,12 @@ impl RuntimeResourceIdentityRef<'_> {
         match self {
             Self::PluginProcess { instance_id } => RuntimeResourceIdentity::PluginProcess {
                 instance_id: instance_id.clone(),
+            },
+            Self::SinkBellRegion { instance_id } => RuntimeResourceIdentity::SinkBellRegion {
+                instance_id: instance_id.clone(),
+            },
+            Self::FlowBellRegion { flow_id } => RuntimeResourceIdentity::FlowBellRegion {
+                flow_id: flow_id.clone(),
             },
             Self::SourceQueuePair {
                 flow_id,
