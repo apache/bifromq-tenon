@@ -424,9 +424,10 @@ fn expected_pipeline_stop(
 ) -> Result<(), PipelineSupervisorError> {
     match result {
         Ok((_, Ok(PipelineLifecycleCompletion::Stopped))) => Ok(()),
-        Ok((_, Ok(PipelineLifecycleCompletion::ShutdownTimedOut))) => Err(
-            PipelineSupervisorError::StoppedUnexpectedly(document_id.clone()),
-        ),
+        Ok((_, Ok(PipelineLifecycleCompletion::ShutdownTimedOut))) => {
+            super::write_pipeline_shutdown_timeout(document_id);
+            Ok(())
+        }
         Ok((_, Err(source))) => Err(PipelineSupervisorError::Lifecycle {
             document_id: document_id.clone(),
             source: Box::new(source),

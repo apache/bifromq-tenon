@@ -44,6 +44,7 @@ pub(crate) mod test_support;
 
 use crate::config::{RunnerConfig, RunnerConfigError};
 use crate::error::ErrorChain;
+use crate::identifiers::TenonDocumentId;
 use crate::metrics::{CoreProcess, MetricsRuntime};
 use executable::CapturedRunnerExecutable;
 use extensions::RunnerHooks;
@@ -82,10 +83,14 @@ pub(crate) fn run_from_arguments(
 
 fn write_shutdown_diagnostics(report: &RunnerShutdownReport) {
     for document_id in report.timed_out_documents() {
-        eprintln!(
-            "runner.pipeline_shutdown_timed_out: Pipeline shutdown exceeded its deadline: {document_id}"
-        );
+        write_pipeline_shutdown_timeout(document_id);
     }
+}
+
+fn write_pipeline_shutdown_timeout(document_id: &TenonDocumentId) {
+    eprintln!(
+        "runner.pipeline_shutdown_timed_out: Pipeline shutdown exceeded its deadline: {document_id}"
+    );
 }
 
 fn run(

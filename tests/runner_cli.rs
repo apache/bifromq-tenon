@@ -33,6 +33,8 @@ use std::{fs, iter, thread};
 use plugin_fixture::file_tree;
 #[path = "runner_cli/plugin_fixture.rs"]
 mod plugin_fixture;
+#[path = "support/runner_http.rs"]
+mod runner_http_support;
 use file_tree::named_files;
 use plugin_fixture::{PluginInterface, install_program};
 
@@ -474,6 +476,97 @@ fn pipeline_shutdown_timeout_is_recorded_without_failing_planned_runner_shutdown
     );
     wait_for_processes_to_exit(iter::once(pipeline).chain(plugins))?;
     assert!(!runtime_root.exists());
+    Ok(())
+}
+
+#[test]
+fn document_delete_timeout_keeps_runner_and_other_pipeline_running() -> io::Result<()> {
+    let _runner_cli_guard = runner_cli_test_guard();
+    for recreate in [false, true] {
+        let directory = tempfile::tempdir()?;
+        install_program(directory.path(), PluginInterface::Source)?;
+        install_program(directory.path(), PluginInterface::Sink)?;
+        let retiring = document_with_delayed_source_shutdown("retiring");
+        let continuing = document("continuing");
+        write_document(directory.path(), "retiring", &retiring)?;
+        write_document(directory.path(), "continuing", &continuing)?;
+        let config_path = write_config_with_shutdown_timeout(directory.path(), 1_000)?;
+        let config: serde_json::Value = serde_json::from_slice(&fs::read(&config_path)?)?;
+        let address = config["http"]["listenAddress"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("HTTP address is missing from the fixture"))?
+            .parse()
+            .map_err(io::Error::other)?;
+        let mut runner = TestRunner::spawn(&config_path)?;
+        let runtime_root = wait_for_runtime_root(directory.path())?;
+        let retiring_root = runtime_root.join(sha256_hex(retiring.as_bytes()));
+        let continuing_root = runtime_root.join(sha256_hex(continuing.as_bytes()));
+        let old_pipeline = wait_for_plugin_markers(&retiring_root, None)
+            .map_err(|source| test_step_error("Retiring Pipeline did not start", source))?;
+        let old_plugins = wait_for_process_markers(&retiring_root, "process.pid", 2)?;
+        let continuing_pipeline = wait_for_plugin_markers(&continuing_root, None)
+            .map_err(|source| test_step_error("Continuing Pipeline did not start", source))?;
+        let continuing_plugins = wait_for_process_markers(&continuing_root, "process.pid", 2)?;
+        let transport = runner_http_support::TestTransport::Http;
+        let etag = format!("\"{}\"", sha256_hex(retiring.as_bytes()));
+        let deleted = transport.request(
+            address,
+            "DELETE",
+            "/documents/retiring",
+            &[("If-Match", &etag)],
+            &[],
+        )?;
+        assert_eq!(deleted.status, 204, "{}", deleted.body_text());
+        wait_for_pipeline_shutdown_requests(&runtime_root, 1)
+            .map_err(|source| test_step_error("Pipeline shutdown was not requested", source))?;
+        if recreate {
+            let replacement = document("retiring");
+            let created = transport.request(
+                address,
+                "PUT",
+                "/documents/retiring",
+                &[
+                    ("If-None-Match", "*"),
+                    ("Content-Type", "application/jsonc"),
+                ],
+                replacement.as_bytes(),
+            )?;
+            assert_eq!(created.status, 201, "{}", created.body_text());
+            let replacement_root = runtime_root.join(sha256_hex(replacement.as_bytes()));
+            wait_for_plugin_markers(&replacement_root, Some(old_pipeline))?;
+        }
+        wait_for_processes_to_exit(iter::once(old_pipeline).chain(old_plugins))?;
+        wait_until(|| {
+            runner.ensure_running()?;
+            Ok((!retiring_root.exists()).then_some(()))
+        })?;
+        runner.ensure_running()?;
+        for process in iter::once(continuing_pipeline).chain(continuing_plugins.iter().copied()) {
+            test_kill_process(process).map_err(io::Error::from)?;
+        }
+        let status = transport.request(address, "GET", "/pipelines/continuing", &[], &[])?;
+        assert_eq!(status.status, 200, "{}", status.body_text());
+        assert_eq!(status.json()["state"], "running");
+        let retired = transport.request(address, "GET", "/pipelines/retiring", &[], &[])?;
+        if recreate {
+            assert_eq!(retired.status, 200, "{}", retired.body_text());
+            assert_eq!(retired.json()["state"], "running");
+        } else {
+            assert_eq!(retired.status, 404, "{}", retired.body_text());
+        }
+        let output = runner.terminate_and_wait()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            runner_diagnostics(&output.stderr)?,
+            "runner.pipeline_shutdown_timed_out: Pipeline shutdown exceeded its deadline: retiring\n"
+        );
+        wait_for_processes_to_exit(iter::once(continuing_pipeline).chain(continuing_plugins))?;
+        assert!(!runtime_root.exists());
+    }
     Ok(())
 }
 

@@ -57,6 +57,10 @@ In-flight messages, Lua state and timers do not survive restarts. Use upstream r
 
 Use SIGINT or SIGTERM for normal shutdown. Allow enough time for the configured Pipeline shutdown deadline before forcing termination. Storage or installed-package corruption can stop the Runner; retain stderr and the exit status for diagnosis.
 
+Document deletion starts Pipeline shutdown. If the Pipeline does not stop before its deadline, the Runner sends `SIGKILL` to the old process group. It waits for the Pipeline process to exit and removes its working directory. It writes `runner.pipeline_shutdown_timed_out` to stderr and continues to serve other Documents. If the same Document is created during shutdown, its new Pipeline starts after these cleanup steps.
+
+This timeout does not change the exit status of a subsequent normal Runner shutdown. Cleanup errors and internal failures can still stop the Runner with a nonzero exit status.
+
 ## Transport and access
 
 Use the [security policy and threat model](../SECURITY.md) to define the deployment's management access, trusted workloads, secrets and host isolation before exposing this listener.
