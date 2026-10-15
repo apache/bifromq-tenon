@@ -33,7 +33,7 @@ Conceptually, one event is processed as `(state, event) → (next state, effects
 | --- | --- |
 | Events | Source input and timer expiration enter the same `main(event)`, one event at a time. |
 | State | Custom globals and closure state survive between calls within the same VM. Channels have independent state. |
-| Effects | `emit(payload)` requests output to the Flow's Sinks; `emit()` establishes a completion-only boundary. `setTimeout` schedules or replaces a timer, and `clearTimeout` cancels one. |
+| Effects | `emit(payload, instanceId?)` requests output to the Flow's Sinks; `emit()` establishes a completion-only boundary. `setTimeout` schedules or replaces a timer, and `clearTimeout` cancels one. |
 | Future events | A pending timer produces a later timer event in the same VM. Even a zero-delay timer waits for the event loop; it never reenters `main` synchronously. |
 
 Pure filtering and mapping fit this model without keeping application state between events. Stateful scripts can accumulate records, debounce input, or change behavior as events arrive. State and timers are volatile and are recreated when the VM resets. Tenon does not persist Lua execution progress or provide durable Lua state or timers.
@@ -104,11 +104,23 @@ Only a root Builder exposes `build()`. Nested Builders edit the corresponding fi
 
 Use `:` for method calls. Receivers must belong to the same exact registry binding and message type; argument counts are exact. Enum values use descriptor symbol names, strings must be UTF-8, bytes are binary, and floats must be finite. Unsigned 64-bit values use decimal strings without signs, whitespace or leading zeros (except `"0"`), within the unsigned 64-bit range. Map keys follow the same representation rules. Business validation such as a downstream topic's allowed characters belongs to the plugin, not the Builder.
 
-`build()` produces an immutable snapshot. Later Builder changes do not alter it. `emit(snapshot)` sends the value returned by `build()` to every matching Sink instance declared by the Flow.
+`build()` produces an immutable snapshot. Later Builder changes do not alter it.
 
-`emit()` with no arguments produces no Sink record and establishes a completion boundary. `emit(nil)` is an error. Output is allowed only during `main` or its helpers, not at top level. One invocation may emit zero or more times. Each successful emit is accepted in order; permanent record-size rejection happens before acceptance with `egress.record_too_large`. If a Sink cannot accept output yet, the channel waits; other channels continue.
+| Call | Output targets |
+| --- | --- |
+| `emit()` | No Sink output; establishes a completion boundary. |
+| `emit(payload)` | Every matching Sink instance in this Flow. |
+| `emit(payload, instanceId)` | Only the specified Sink instance in this Flow. |
 
-With at-least-once delivery, the first successful emit completes the pending Source group once all matching Sinks report success. A zero-argument emit completes the group without Sink output. Subsequent emits are separate outputs and cannot bypass, extend or roll back the first group's completion. See [delivery semantics](tenon-document.md#completion-and-delivery) and the [SDK contract](../sdk/plugin-sdk-contract.md) for terminal outcomes.
+`payload` must be the value returned by `build()`. The optional `instanceId` must be a UTF-8 string that names an instance in this Flow's `sinks`. That instance must have the payload's exact `programName@exactVersion`. For example, `emit(builder:build(), "A")` selects instance `A`, even if `B` uses the same Program and version.
+
+An invalid target raises an ordinary Lua error before Tenon accepts any output from that call. This includes an unknown instance, a different exact contract, a non-string value, or explicit `nil`. `emit(nil)` is also an error. These errors are catchable with `pcall`. An uncaught error uses the existing `process.lua_main_failed` diagnostic and VM recovery. A caught error does not produce that diagnostic.
+
+Source and timer calls use the current Flow bindings. A binding update changes the targets for later calls. A declared target remains valid while its process is not ready. The channel waits for capacity on the selected Queue. It does not send to another instance as a fallback. Without `instanceId`, the channel waits for every matching Queue before it writes any output.
+
+Output is allowed only during `main` or its helpers, not at top level. One invocation may emit zero or more times. Tenon accepts each successful emit in order. A record-size error occurs before acceptance with `egress.record_too_large`. A later error does not withdraw earlier accepted outputs.
+
+With at-least-once delivery, the first successful emit takes the pending Source group. A payload boundary completes that group after all of its selected targets report success. A zero-argument emit completes the group without Sink output. Later emits produce separate outputs and do not change the first group's completion conditions. Earlier outstanding output can still delay completion of a later group. See [delivery semantics](tenon-document.md#completion-and-delivery) and the [SDK contract](../sdk/plugin-sdk-contract.md) for terminal outcomes.
 
 Registry lookup, Builder receiver/argument/type/range errors and timer argument errors are ordinary Lua errors catchable with `pcall`. Resource-limit failures and sandbox violations are not recoverable inside the invalidated VM.
 

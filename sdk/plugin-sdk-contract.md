@@ -163,7 +163,11 @@ The total unfinished sends in a channel, across encoding, submission, processing
 
 With `at-most-once`, Pipeline produces `OK` after copying the complete IngressRecord into owned memory. Later Lua or Sink failures do not change it.
 
-With `at-least-once`, input records remain pending until the first accepted `emit` boundary in a Lua invocation takes the previously pending records and that invocation's Source input. A payload emission freezes its actual target Sinks, waits until every target Queue can accept the complete frame, then commits to them. `OK` is produced only after every target's shared release crosses that emission's committed frame boundary. Pipeline can continue processing while release is pending; successful boundaries settle in order, with record order preserved within each boundary. Error and retry results are handled when their failure occurs and do not use that successful-boundary list.
+With `at-least-once`, input records remain pending until Lua accepts an `emit` boundary. The first boundary in each Lua invocation takes the previously pending records and that invocation's Source input.
+
+A payload emission selects all matching Sinks in its Flow, or the single instance specified by `emit(payload, instanceId)`. The [Lua contract](../guide/lua.md) defines target validation. The emission freezes these targets, waits until every selected Queue can accept the complete frame, then commits to them. Pipeline produces `OK` only after every target's shared release crosses that emission's committed frame boundary.
+
+Pipeline can continue processing while release is pending. Successful boundaries settle in order and preserve record order within each boundary. Pipeline handles error and retry results when their failure occurs. These results do not use the successful-boundary list.
 
 A no-argument `emit()` establishes a boundary without Sink output or waiting for Sink release; Completion capacity can still block it. Further emissions in the same invocation create outputs but do not take the Source records already assigned to the first boundary. A timer invocation can establish a boundary for previously pending inputs. Successful boundaries are never rolled back.
 

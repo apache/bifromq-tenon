@@ -33,25 +33,29 @@ use super::{
     create_catchable_api_wrapper_factory, finish_api_call, protect_name, sandbox_violation,
 };
 use crate::contracts::sink;
-use crate::identifiers::SinkContractId;
+use crate::identifiers::{PluginInstanceId, SinkContractId};
 use mlua::{Function, Lua, MultiValue, Table, Value as LuaValue};
 use prost::Message;
 use prost::bytes::BufMut;
 use prost::encoding::{self, WireType};
 use prost_reflect::{DynamicMessage, FieldDescriptor, Kind, MapKey, Value};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::rc::Rc;
 
 const EMIT_ARGUMENT_ERROR: &str = "emit argument must be a built Payload";
 const EMIT_ARGUMENTS_ERROR: &str = "emit arguments are invalid";
 
+/// Sink instances from the routes bound to one Channel generation.
+pub(crate) type EmitTargets = HashMap<PluginInstanceId, SinkContractId>;
+
 /// One ordered completion boundary accepted during a Lua `main` call.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum EmitBoundary {
     Payload {
         sink_contract_id: SinkContractId,
+        instance_id: Option<PluginInstanceId>,
         record: sink::EncodedEgressRecord,
     },
     CompletionOnly,
@@ -61,7 +65,10 @@ pub(crate) enum EmitBoundary {
 enum EmitState {
     #[default]
     Inactive,
-    Active(Vec<EmitBoundary>),
+    Active {
+        targets: Rc<EmitTargets>,
+        boundaries: Vec<EmitBoundary>,
+    },
 }
 
 /// Per-VM call slot shared by the Lua callback and its Rust event-loop owner.
@@ -71,7 +78,7 @@ pub(super) struct EmitSlot {
 }
 
 impl EmitSlot {
-    pub(super) fn begin_main(&self) -> LuaApiResult<()> {
+    pub(super) fn begin_main(&self, targets: Rc<EmitTargets>) -> LuaApiResult<()> {
         let mut state = self
             .state
             .try_borrow_mut()
@@ -79,7 +86,10 @@ impl EmitSlot {
         if !matches!(*state, EmitState::Inactive) {
             return Err(LuaApiFailure::InternalInvariantViolation);
         }
-        *state = EmitState::Active(Vec::new());
+        *state = EmitState::Active {
+            targets,
+            boundaries: Vec::new(),
+        };
         Ok(())
     }
 
@@ -90,14 +100,14 @@ impl EmitSlot {
             .map_err(|_| LuaApiFailure::InternalInvariantViolation)?;
         match std::mem::take(&mut *state) {
             EmitState::Inactive => Err(LuaApiFailure::InternalInvariantViolation),
-            EmitState::Active(boundaries) => Ok(boundaries),
+            EmitState::Active { boundaries, .. } => Ok(boundaries),
         }
     }
 
     fn is_active(&self) -> LuaApiResult<bool> {
         self.state
             .try_borrow()
-            .map(|state| matches!(*state, EmitState::Active(_)))
+            .map(|state| matches!(*state, EmitState::Active { .. }))
             .map_err(|_| LuaApiFailure::InternalInvariantViolation)
     }
 
@@ -106,7 +116,7 @@ impl EmitSlot {
             .state
             .try_borrow_mut()
             .map_err(|_| LuaApiFailure::InternalInvariantViolation)?;
-        let EmitState::Active(boundaries) = &mut *state else {
+        let EmitState::Active { boundaries, .. } = &mut *state else {
             return Err(LuaApiFailure::InternalInvariantViolation);
         };
         boundaries
@@ -114,6 +124,37 @@ impl EmitSlot {
             .map_err(|_| LuaApiFailure::ResourceLimitExceeded)?;
         boundaries.push(boundary);
         Ok(())
+    }
+
+    fn resolve_target(
+        &self,
+        value: LuaValue,
+        contract: &SinkContractId,
+    ) -> LuaApiResult<PluginInstanceId> {
+        let LuaValue::String(value) = value else {
+            return Err(LuaApiFailure::Api(
+                "emit target must be an instance ID string",
+            ));
+        };
+        let id = value
+            .to_str()
+            .map_err(|_| LuaApiFailure::Api("emit target must be a UTF-8 instance ID"))?;
+        let state = self
+            .state
+            .try_borrow()
+            .map_err(|_| LuaApiFailure::InternalInvariantViolation)?;
+        let EmitState::Active { targets, .. } = &*state else {
+            return Err(LuaApiFailure::InternalInvariantViolation);
+        };
+        let (id, target_contract) = targets
+            .get_key_value(id.as_ref())
+            .ok_or(LuaApiFailure::Api("emit target is not a Sink in this Flow"))?;
+        if target_contract != contract {
+            return Err(LuaApiFailure::Api(
+                "emit target does not match the Payload Contract",
+            ));
+        }
+        Ok(id.clone())
     }
 }
 
@@ -153,7 +194,7 @@ fn accept_emit(
     if arguments.is_empty() {
         return slot.accept(EmitBoundary::CompletionOnly);
     }
-    if arguments.len() != 1 {
+    if arguments.len() > 2 {
         return Err(LuaApiFailure::Api(EMIT_ARGUMENTS_ERROR));
     }
     let Some(LuaValue::UserData(payload)) = arguments.pop_front() else {
@@ -165,8 +206,13 @@ fn accept_emit(
     let payload = payload
         .borrow::<BuiltPayload>()
         .map_err(|_| LuaApiFailure::InternalInvariantViolation)?;
+    let instance_id = arguments
+        .pop_front()
+        .map(|value| slot.resolve_target(value, payload.sink_contract_id()))
+        .transpose()?;
     let boundary = EmitBoundary::Payload {
         sink_contract_id: payload.sink_contract_id().clone(),
+        instance_id,
         record: encode_deterministically(payload.message(), max_record_bytes)?,
     };
     slot.accept(boundary)

@@ -58,7 +58,9 @@ To run, a Document also needs the exact plugin versions installed, compatible pl
 
 With `at-most-once`, Source receives `OK` when the Pipeline has read the complete input record, before Lua processing or Sink delivery. Later failures do not change that result.
 
-With `at-least-once`, Source records remain pending in input order until an `emit` completes them. The first successful `emit` in a `main` call takes all records pending at that point. A payload emit sends to every matching Sink instance declared by that Flow and waits for every target Sink to report completion before completing that group. A zero-argument `emit()` produces no Sink record and completes the group without waiting for a Sink. Returning without any accepted emit leaves records pending for a later completion boundary.
+With `at-least-once`, Source records remain pending in input order until an `emit` completes them. The first successful `emit` in a `main` call takes all records pending at that point.
+
+A payload emit sends to every matching Sink instance in the Flow, unless `emit(payload, instanceId)` selects one instance. Tenon waits for all selected targets to report completion before it completes that group. Target validation follows the [Lua contract](lua.md#builders-and-output). A zero-argument `emit()` produces no Sink record and completes the group without waiting for a Sink. Returning without any accepted emit leaves records pending for a later completion boundary.
 
 Later emits in the same call produce additional outputs without changing that Source group's completion. Multiple emits are not a transaction; a later error cannot roll back an earlier successful boundary. Each Sink plugin defines when it reports successful delivery. Source `RETRY` requires the Source implementation to decide replay; it does not create a durable Runner retry log. Plugin authors should handle completion results as described by their [language SDK](plugins.md#sdks-and-generators).
 

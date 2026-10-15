@@ -69,6 +69,7 @@ impl LuaVm {
                 id: None,
                 sequence: 0,
             },
+            Default::default(),
         )
     }
 
@@ -282,6 +283,7 @@ fn payload_boundary(boundary: &EmitBoundary) -> io::Result<(&SinkContractId, &[u
     let EmitBoundary::Payload {
         sink_contract_id,
         record,
+        ..
     } = boundary
     else {
         return Err(io::Error::other("Expected a payload emit boundary"));
@@ -423,7 +425,7 @@ fn call_source(
     timestamp: i64,
     payload: impl Into<bytes::Bytes>,
 ) -> io::Result<LuaMainOutcome> {
-    vm.call_source(timestamp, payload.into())
+    vm.call_source(timestamp, payload.into(), Default::default())
         .map_err(io::Error::other)
 }
 
@@ -623,6 +625,70 @@ fn emit_frames_empty_payload_and_varint_length_boundaries() -> io::Result<()> {
 }
 
 #[test]
+fn emit_checks_instance_targets_before_acceptance_and_preserves_the_prefix() -> io::Result<()> {
+    let contract =
+        SinkContractId::try_from("com.example.lua-builder@1.0.0").map_err(io::Error::other)?;
+    let other =
+        SinkContractId::try_from("com.example.lua-builder@2.0.0").map_err(io::Error::other)?;
+    let targets = Rc::new(HashMap::from([
+        (
+            crate::identifiers::PluginInstanceId::try_from("A").map_err(io::Error::other)?,
+            contract.clone(),
+        ),
+        (
+            crate::identifiers::PluginInstanceId::try_from("B").map_err(io::Error::other)?,
+            other.clone(),
+        ),
+    ]));
+    let mut vm = load_vm_with_contracts(
+        r#"
+        local builder = registry:getBuilder("com.example.lua-builder@1.0.0")
+        function main(event)
+            local payload = builder:build()
+            for _, target in ipairs({false, 1, {}, "", "missing", "B", string.char(255)}) do
+                assert(not pcall(emit, payload, target))
+            end
+            assert(not pcall(emit, payload, nil))
+            assert(not pcall(emit, payload, "A", "extra"))
+            assert(not pcall(emit, nil, "A"))
+            emit(payload, "A")
+            emit(payload)
+            emit(payload, "missing")
+        end
+        "#,
+        limits()?,
+        HashMap::from([
+            (contract, lua_builder_contract()?),
+            (other, lua_builder_contract()?),
+        ]),
+    )
+    .map_err(test_error)?;
+    let outcome = vm
+        .call_source(0, empty_source_payload(), targets)
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        outcome.result().err().map(LuaVmError::kind),
+        Some(LuaVmErrorKind::MainFailed)
+    );
+    let [
+        EmitBoundary::Payload {
+            instance_id: Some(id),
+            ..
+        },
+        EmitBoundary::Payload {
+            instance_id: None, ..
+        },
+    ] = outcome.emit_boundaries()
+    else {
+        return Err(io::Error::other(
+            "Expected only the accepted target and broadcast boundaries",
+        ));
+    };
+    assert_eq!(id.as_str(), "A");
+    Ok(())
+}
+
+#[test]
 fn emit_checks_complete_record_size_and_preserves_accepted_boundaries() -> io::Result<()> {
     let registry = HashMap::from([(
         SinkContractId::try_from("com.example.lua-builder@1.0.0").map_err(io::Error::other)?,
@@ -686,7 +752,8 @@ fn emit_accepts_built_payloads_and_preserves_the_accepted_prefix() -> io::Result
             local extra_ok, extra_message = pcall(
                 emit,
                 builder:build(),
-                "extra-argument"
+                "extra-argument",
+                "third-argument"
             )
             assert(not extra_ok)
             assert(extra_message == "emit arguments are invalid")
@@ -2697,7 +2764,7 @@ fn top_level_zero_timeout_waits_for_the_next_event_loop_turn() -> io::Result<()>
     assert!(!lua_has_timeout(&vm).map_err(test_error)?);
     assert!(vm.scheduled_timer().is_none());
     assert!(vm.begin_timer().is_err());
-    vm.call_timer_event(1, event)
+    vm.call_timer_event(1, event, Default::default())
         .into_result_without_emit_boundaries()
         .map_err(test_error)?;
     assert_eq!(
@@ -2881,7 +2948,7 @@ fn named_timers_replace_clear_and_expose_their_id() -> io::Result<()> {
     let event = vm
         .begin_timer()
         .map_err(|_| io::Error::other("timer missing"))?;
-    vm.call_timer_event(10, event)
+    vm.call_timer_event(10, event, Default::default())
         .into_result_without_emit_boundaries()
         .map_err(test_error)
 }
@@ -2904,14 +2971,14 @@ fn zero_delay_timers_are_dispatched_in_registration_order() -> io::Result<()> {
         .begin_timer()
         .map_err(|_| io::Error::other("first timer missing"))?;
     assert_eq!(first.id.as_deref(), Some("first"));
-    vm.call_timer_event(0, first)
+    vm.call_timer_event(0, first, Default::default())
         .into_result_without_emit_boundaries()
         .map_err(test_error)?;
     let second = vm
         .begin_timer()
         .map_err(|_| io::Error::other("second timer missing"))?;
     assert_eq!(second.id.as_deref(), Some("second"));
-    vm.call_timer_event(0, second)
+    vm.call_timer_event(0, second, Default::default())
         .into_result_without_emit_boundaries()
         .map_err(test_error)?;
     let anonymous = vm
@@ -3133,7 +3200,7 @@ fn failed_main_does_not_expose_its_timer_schedule() -> io::Result<()> {
         .begin_timer()
         .map_err(|_| io::Error::other("timer missing"))?;
     let Err(error) = vm
-        .call_timer_event(1, event)
+        .call_timer_event(1, event, Default::default())
         .into_result_without_emit_boundaries()
     else {
         return Err(io::Error::other("failing main should be rejected"));
@@ -4260,7 +4327,11 @@ fn each_vm_decodes_source_bytes_with_its_frozen_contract() -> io::Result<()> {
         || false,
     )
     .map_err(test_error)?;
-    assert!(primary_vm.call_source(1, payload.clone()).is_err());
+    assert!(
+        primary_vm
+            .call_source(1, payload.clone(), Default::default())
+            .is_err()
+    );
     call_source(&mut primary_vm, 2, empty_source_payload())?
         .into_result_without_emit_boundaries()
         .map_err(test_error)?;
@@ -4474,13 +4545,25 @@ fn source_payload_preserves_proto3_default_and_presence_semantics() -> io::Resul
 #[test]
 fn source_payload_rejects_malformed_utf8_and_unknown_enum_numbers() -> io::Result<()> {
     let mut vm = load_vm("function main(event) end", limits()?).map_err(test_error)?;
-    let malformed = vm.call_source(75, bytes::Bytes::from_static(b"\x0a\x02x"));
+    let malformed = vm.call_source(
+        75,
+        bytes::Bytes::from_static(b"\x0a\x02x"),
+        Default::default(),
+    );
     assert!(malformed.is_err());
 
-    let invalid_utf8 = vm.call_source(76, bytes::Bytes::from_static(b"\x0a\x01\xff"));
+    let invalid_utf8 = vm.call_source(
+        76,
+        bytes::Bytes::from_static(b"\x0a\x01\xff"),
+        Default::default(),
+    );
     assert!(invalid_utf8.is_err());
 
-    let unknown_enum = vm.call_source(77, bytes::Bytes::from_static(b"\x50\x07"));
+    let unknown_enum = vm.call_source(
+        77,
+        bytes::Bytes::from_static(b"\x50\x07"),
+        Default::default(),
+    );
     assert!(unknown_enum.is_err());
     Ok(())
 }
@@ -4811,7 +4894,11 @@ fn uncaught_main_error_makes_the_vm_unusable() -> io::Result<()> {
     assert_eq!(second_error.kind(), LuaVmErrorKind::MainFailed);
 
     let terminal_outcome = vm
-        .call_source(52, bytes::Bytes::from_static(b"\x0a\x02x"))
+        .call_source(
+            52,
+            bytes::Bytes::from_static(b"\x0a\x02x"),
+            Default::default(),
+        )
         .map_err(|_| {
             io::Error::other("failed VM should report its terminal fault before decoding input")
         })?;

@@ -2497,3 +2497,5 @@ mod program_contracts;
 mod candidate_cleanup;
 
 mod metrics;
+
+mod target_emit;

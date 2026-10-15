@@ -407,13 +407,14 @@ fn unified_program_roots_decode_source_and_build_sink_with_the_shared_vm() -> io
     ).map_err(|error| io::Error::other(error.to_string()))?;
     drop(store);
     let (result, boundaries) = vm
-        .call_source(7, input.encode_to_vec().into())
+        .call_source(7, input.encode_to_vec().into(), Default::default())
         .map_err(io::Error::other)?
         .into_parts();
     result.map_err(|error| io::Error::other(error.to_string()))?;
     let [
         EmitBoundary::Payload {
             sink_contract_id: output_contract,
+            instance_id: None,
             record,
         },
     ] = boundaries.as_slice()

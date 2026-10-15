@@ -35,6 +35,7 @@ use std::sync::Arc;
 use super::metrics::{ChannelMetrics, TargetMetrics, WaitKind};
 use crate::contracts::sink::EncodedEgressRecord;
 use crate::identifiers::{PluginInstanceId, SinkContractId};
+use crate::lua::EmitTargets;
 use tenon_ipc::bell::{BellRegion, LoopBell, WaitOutcome};
 use tenon_ipc::queue::QueueObserver;
 use tenon_ipc::queue::{QueueRuntimeError, QueueWriter, WriteOutcome, WriteReceipt};
@@ -125,28 +126,33 @@ impl EgressRoute {
         }
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "Lua validates the target against this bound route generation"
+    )]
     pub(super) fn send(
         &mut self,
         record: EncodedEgressRecord,
+        instance_id: Option<PluginInstanceId>,
         metrics: &ChannelMetrics,
         stopped: impl Fn() -> bool,
     ) -> Result<SendOutcome, EgressError> {
-        let payload_bytes = record.payload().len();
+        if let Some(instance_id) = instance_id {
+            let target = self
+                .targets
+                .get_mut(&instance_id)
+                .expect("an accepted target belongs to this bound route");
+            if target.wait_writable(record.len(), metrics, &stopped)? == WaitOutcome::Interrupted
+                || stopped()
+            {
+                return Ok(SendOutcome::Interrupted);
+            }
+            let receipt = target.commit(&record, metrics)?;
+            return Ok(SendOutcome::Committed(vec![(instance_id, receipt)]));
+        }
         for target in self.targets.values_mut() {
-            let mut wait = metrics.wait(WaitKind::EgressCapacity(&target.metrics));
-            loop {
-                if stopped() {
-                    return Ok(SendOutcome::Interrupted);
-                }
-                if target
-                    .writer
-                    .wait_writable_observed(record.len(), || wait.blocked())
-                    .map_err(EgressError)?
-                    == WaitOutcome::Ready
-                {
-                    wait.ready();
-                    break;
-                }
+            if target.wait_writable(record.len(), metrics, &stopped)? == WaitOutcome::Interrupted {
+                return Ok(SendOutcome::Interrupted);
             }
         }
         if stopped() {
@@ -154,23 +160,7 @@ impl EgressRoute {
         }
         let mut receipts = Vec::with_capacity(self.targets.len());
         for (instance, target) in &mut self.targets {
-            let outcome = target
-                .writer
-                .try_write_with(
-                    record.len(),
-                    |destination| Write::write_all(destination, record.as_bytes()),
-                    || {
-                        metrics.egress(&target.metrics, payload_bytes);
-                    },
-                )
-                .map_err(EgressError)?;
-            assert!(
-                matches!(outcome, WriteOutcome::Committed(_)),
-                "exclusive writers cannot lose space after every target is writable"
-            );
-            if let WriteOutcome::Committed(receipt) = outcome {
-                receipts.push((instance.clone(), receipt));
-            }
+            receipts.push((instance.clone(), target.commit(&record, metrics)?));
         }
         Ok(SendOutcome::Committed(receipts))
     }
@@ -233,6 +223,65 @@ pub(super) fn bind_routes(
 struct EgressTarget {
     writer: QueueWriter,
     metrics: TargetMetrics,
+}
+
+impl EgressTarget {
+    fn wait_writable(
+        &mut self,
+        record_len: usize,
+        metrics: &ChannelMetrics,
+        stopped: impl Fn() -> bool,
+    ) -> Result<WaitOutcome, EgressError> {
+        let mut wait = metrics.wait(WaitKind::EgressCapacity(&self.metrics));
+        loop {
+            if stopped() {
+                return Ok(WaitOutcome::Interrupted);
+            }
+            if self
+                .writer
+                .wait_writable_observed(record_len, || wait.blocked())
+                .map_err(EgressError)?
+                == WaitOutcome::Ready
+            {
+                wait.ready();
+                return Ok(WaitOutcome::Ready);
+            }
+        }
+    }
+
+    fn commit(
+        &mut self,
+        record: &EncodedEgressRecord,
+        metrics: &ChannelMetrics,
+    ) -> Result<WriteReceipt, EgressError> {
+        let outcome = self
+            .writer
+            .try_write_with(
+                record.len(),
+                |destination| Write::write_all(destination, record.as_bytes()),
+                || metrics.egress(&self.metrics, record.payload().len()),
+            )
+            .map_err(EgressError)?;
+        let WriteOutcome::Committed(receipt) = outcome else {
+            unreachable!(
+                "exclusive writers cannot lose space after every selected target is writable"
+            );
+        };
+        Ok(receipt)
+    }
+}
+
+/// Captures the bound instances for Lua calls in this route generation.
+pub(super) fn emit_targets(routes: &EgressRoutes) -> EmitTargets {
+    routes
+        .iter()
+        .flat_map(|(contract, route)| {
+            route
+                .targets
+                .keys()
+                .map(|id| (id.clone(), contract.clone()))
+        })
+        .collect()
 }
 
 /// Returns whether the Sink already released every target of one accepted

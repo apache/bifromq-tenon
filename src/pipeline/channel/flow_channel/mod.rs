@@ -89,10 +89,10 @@ use super::wake::{ChannelWake, EgressWaitRegistration};
 
 use super::egress::{
     EgressError, EgressHandoff, EgressRoutes, PendingRelease, PreparedEgressRoutes, SendOutcome,
-    bind_routes, is_released, settlement_metrics, target_departed,
+    bind_routes, emit_targets, is_released, settlement_metrics, target_departed,
 };
 use crate::contracts::source::{IngressCompletionStatus, IngressRecord};
-use crate::lua::{EmitBoundary, LuaMainOutcome, LuaVm, LuaVmErrorKind, TimerSchedule};
+use crate::lua::{EmitBoundary, EmitTargets, LuaMainOutcome, LuaVm, LuaVmErrorKind, TimerSchedule};
 use crate::pipeline::diagnostics::{ChannelDiagnosticPublisher, LuaDiagnosticPublisher};
 use crate::pipeline::ingress_queue::{IngressCompletionWriteOutcome, IngressQueuePair};
 use crate::tenon_document::SourceDelivery;
@@ -185,6 +185,7 @@ impl PreparedFlowChannel {
             metrics: self.metrics,
             lua_vm: Some(self.lua_vm),
             lua_vm_diagnostics: Some(self.lua_vm_diagnostics),
+            emit_targets: Rc::new(emit_targets(&routes)),
             routes,
             egress_waits: self.egress_waits,
             bell: self.bell,
@@ -213,6 +214,9 @@ pub(crate) struct FlowChannel {
     lua_vm: Option<LuaVm>,
     lua_vm_diagnostics: Option<LuaDiagnosticPublisher>,
     routes: EgressRoutes,
+    // Frozen route-generation view shared with the active Lua callback.
+    // The callback releases its reference when main ends; cutover installs a new view.
+    emit_targets: Rc<EmitTargets>,
     egress_waits: Arc<Mutex<EgressWaitRegistration>>,
     bell: Arc<LoopBell>,
     pending_records: Vec<u64>,
@@ -581,6 +585,7 @@ impl FlowChannel {
             &self.metrics,
         )
         .map_err(|source| FlowChannelError::EgressRelease { source })?;
+        self.emit_targets = Rc::new(emit_targets(&self.routes));
         self.bind_route_generation();
         permit.complete_and_wait_for_activation()
     }
@@ -711,7 +716,11 @@ impl FlowChannel {
         }
 
         let timestamp = self.timestamp_millis()?;
-        let outcome = match self.lua_vm_mut()?.call_source(timestamp, record.payload) {
+        let targets = Rc::clone(&self.emit_targets);
+        let outcome = match self
+            .lua_vm_mut()?
+            .call_source(timestamp, record.payload, targets)
+        {
             Ok(outcome) => outcome,
             Err(error) => {
                 let code = error.metric_type();
@@ -807,6 +816,7 @@ impl FlowChannel {
     ) -> Result<FlowChannelStep, FlowChannelError> {
         let EmitBoundary::Payload {
             sink_contract_id,
+            instance_id,
             record,
         } = boundary
         else {
@@ -822,7 +832,9 @@ impl FlowChannel {
             .get_mut(&sink_contract_id)
             .expect("Lua emits only registered Sink Contracts from this Channel definition");
         let sent = route
-            .send(record, &self.metrics, || self.control.is_stopping())
+            .send(record, instance_id, &self.metrics, || {
+                self.control.is_stopping()
+            })
             .map_err(|source| FlowChannelError::EgressRoute {
                 sink_contract_id: sink_contract_id.clone(),
                 source,
@@ -1100,7 +1112,10 @@ impl FlowChannel {
             .begin_timer()
             .map_err(|_| FlowChannelError::InternalInvariantViolation)?;
         let timestamp = self.timestamp_millis()?;
-        let outcome = self.lua_vm_mut()?.call_timer_event(timestamp, timer);
+        let targets = Rc::clone(&self.emit_targets);
+        let outcome = self
+            .lua_vm_mut()?
+            .call_timer_event(timestamp, timer, targets);
         self.finish_lua_outcome(outcome, LuaFailureCompletion::Timer)
     }
 

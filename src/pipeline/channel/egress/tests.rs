@@ -34,6 +34,68 @@ use tenon_ipc::queue::contract_test_support::{open_reader, open_writer};
 use tenon_ipc::queue::{DataCapacity, QueueReader, QueueWaiter, ReadOutcome, create_queue_file};
 
 #[test]
+fn selected_target_does_not_wait_for_a_full_unselected_queue() -> io::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (first, mut first_reader) = queue(&directory.path().join("first"), 16)?;
+    let (mut second, mut second_reader) = queue(&directory.path().join("second"), 16)?;
+    assert!(matches!(
+        second
+            .try_write_with(
+                8,
+                |destination| Write::write_all(destination, &[9; 8]),
+                || {}
+            )
+            .map_err(io::Error::other)?,
+        WriteOutcome::Committed(_)
+    ));
+    assert!(matches!(
+        second_reader.try_read().map_err(io::Error::other)?,
+        ReadOutcome::Record(_)
+    ));
+    let wake = second.wait_interrupter();
+    let control = Arc::new(FlowChannelControl::new());
+    let worker_control = Arc::clone(&control);
+    let mut route = route(first, second)?;
+    let id = PluginInstanceId::try_from("first").map_err(io::Error::other)?;
+    let selected = id.clone();
+    let record = encoded_record(&[1])?;
+    let (done, result) = std::sync::mpsc::sync_channel(1);
+    let writer = thread::spawn(move || {
+        let outcome = route.send(record, Some(selected), &ChannelMetrics::default(), || {
+            worker_control.is_stopping()
+        });
+        let _ = done.send(outcome);
+    });
+    let outcome = result.recv_timeout(std::time::Duration::from_secs(5));
+    control.request_stop();
+    wake.interrupt().map_err(io::Error::other)?;
+    writer
+        .join()
+        .map_err(|_| io::Error::other("Selected writer panicked"))?;
+    let outcome = outcome
+        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+    let SendOutcome::Committed(receipts) = outcome else {
+        return Err(io::Error::other(
+            "Selected target waited for the full queue",
+        ));
+    };
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].0, id);
+    assert!(matches!(
+        first_reader.try_read().map_err(io::Error::other)?,
+        ReadOutcome::Record(_)
+    ));
+    assert!(matches!(
+        second_reader.try_read().map_err(io::Error::other)?,
+        ReadOutcome::Empty
+    ));
+    first_reader.release(1).map_err(io::Error::other)?;
+    second_reader.release(1).map_err(io::Error::other)?;
+    Ok(())
+}
+
+#[test]
 fn a_full_last_target_prevents_any_partial_fanout_until_real_release() -> io::Result<()> {
     let directory = tempfile::tempdir()?;
     let (first, mut first_reader) = queue(&directory.path().join("first"), 16)?;
@@ -55,7 +117,8 @@ fn a_full_last_target_prevents_any_partial_fanout_until_real_release() -> io::Re
     ));
     let mut route = route(first, second)?;
     let record = encoded_record(&[1])?;
-    let writer = thread::spawn(move || route.send(record, &ChannelMetrics::default(), || false));
+    let writer =
+        thread::spawn(move || route.send(record, None, &ChannelMetrics::default(), || false));
 
     let armed = wait_for_armed_loop(
         &second_path,
@@ -117,7 +180,7 @@ fn stop_interrupts_a_full_target_without_committing_to_any_target() -> io::Resul
     let mut route = route(first, second)?;
     let record = encoded_record(&[1])?;
     let writer = thread::spawn(move || {
-        route.send(record, &ChannelMetrics::default(), || {
+        route.send(record, None, &ChannelMetrics::default(), || {
             worker_control.is_stopping()
         })
     });
@@ -230,55 +293,72 @@ fn direct_fanout_benchmark() -> io::Result<()> {
             readers.push(reader);
         }
         let metrics = ChannelMetrics::default();
-        let contract = SinkContractId::try_from("benchmark").map_err(io::Error::other)?;
+        let contract =
+            SinkContractId::try_from("com.example.benchmark@1.0.0").map_err(io::Error::other)?;
         let mut routes =
             EgressRoutes::from([(contract.clone(), EgressRoute::new(targets, &metrics))]);
         let payload = vec![7; 1024];
-        criterion.bench_with_input(
-            BenchmarkId::new("direct_egress/1024_bytes", target_count),
-            &target_count,
-            |bencher, _| {
-                // One thread releases real Queues immediately, isolating CPU
-                // cost from scheduling, downstream latency, and capacity waits.
-                let mut round_trip = || -> io::Result<()> {
-                    let route = routes
-                        .get_mut(&contract)
-                        .ok_or_else(|| io::Error::other("Benchmark route is bound"))?;
-                    let SendOutcome::Committed(committed) = route
-                        .send(encoded_record(black_box(&payload))?, &metrics, || false)
-                        .map_err(io::Error::other)?
-                    else {
-                        return Err(io::Error::other("Benchmark send was interrupted"));
-                    };
-                    for reader in &mut readers {
-                        let ReadOutcome::Record(record) =
-                            reader.try_read().map_err(io::Error::other)?
+        for selection in [
+            None,
+            Some(PluginInstanceId::try_from("target-0").map_err(io::Error::other)?),
+        ] {
+            let name = if selection.is_some() {
+                "selected_egress/1024_bytes"
+            } else {
+                "direct_egress/1024_bytes"
+            };
+            criterion.bench_with_input(
+                BenchmarkId::new(name, target_count),
+                &target_count,
+                |bencher, _| {
+                    // One thread releases real Queues immediately, isolating CPU
+                    // cost from scheduling, downstream latency, and capacity waits.
+                    let mut round_trip = || -> io::Result<()> {
+                        let route = routes
+                            .get_mut(&contract)
+                            .ok_or_else(|| io::Error::other("Benchmark route is bound"))?;
+                        let SendOutcome::Committed(committed) = route
+                            .send(
+                                encoded_record(black_box(&payload))?,
+                                selection.clone(),
+                                &metrics,
+                                || false,
+                            )
+                            .map_err(io::Error::other)?
                         else {
-                            return Err(io::Error::other(
-                                "benchmark target missed the committed record",
-                            ));
+                            return Err(io::Error::other("Benchmark send was interrupted"));
                         };
-                        black_box(record.payload());
-                        reader.release(1).map_err(io::Error::other)?;
-                    }
-                    assert!(
-                        is_released(
-                            &routes,
-                            &PendingRelease::new(contract.clone(), committed, Vec::new()),
-                        )
-                        .map_err(io::Error::other)?
-                    );
-                    Ok(())
-                };
-                bencher.iter(|| {
-                    let result = round_trip();
-                    assert!(
-                        result.is_ok(),
-                        "benchmark Queue operation failed: {result:?}"
-                    );
-                });
-            },
-        );
+                        let selected_count = if selection.is_some() { 1 } else { target_count };
+                        for reader in readers.iter_mut().take(selected_count) {
+                            let ReadOutcome::Record(record) =
+                                reader.try_read().map_err(io::Error::other)?
+                            else {
+                                return Err(io::Error::other(
+                                    "benchmark target missed the committed record",
+                                ));
+                            };
+                            black_box(record.payload());
+                            reader.release(1).map_err(io::Error::other)?;
+                        }
+                        assert!(
+                            is_released(
+                                &routes,
+                                &PendingRelease::new(contract.clone(), committed, Vec::new()),
+                            )
+                            .map_err(io::Error::other)?
+                        );
+                        Ok(())
+                    };
+                    bencher.iter(|| {
+                        let result = round_trip();
+                        assert!(
+                            result.is_ok(),
+                            "benchmark Queue operation failed: {result:?}"
+                        );
+                    });
+                },
+            );
+        }
     }
     criterion.final_summary();
     Ok(())

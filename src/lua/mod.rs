@@ -65,7 +65,7 @@ pub(crate) mod metrics;
 mod payload;
 mod timer;
 
-pub(crate) use emit::EmitBoundary;
+pub(crate) use emit::{EmitBoundary, EmitTargets};
 pub(crate) use timer::{TimerEvent, TimerSchedule, TimerSlotInactive};
 
 const HOOK_INSTRUCTION_INTERVAL: u32 = 1_000;
@@ -613,6 +613,7 @@ impl LuaVm {
         &mut self,
         timestamp_millis: i64,
         payload: Bytes,
+        targets: Rc<EmitTargets>,
     ) -> Result<LuaMainOutcome, event::SourcePayloadDecodeError> {
         if let Some(outcome) = self.terminal_outcome() {
             return Ok(outcome);
@@ -622,23 +623,27 @@ impl LuaVm {
             self.source_payload_root.clone(),
             payload,
         )?;
-        Ok(self.call_main_ready(&event))
+        Ok(self.call_main_ready(&event, targets))
     }
 
     pub(crate) fn call_timer_event(
         &mut self,
         timestamp_millis: i64,
         timer: TimerEvent,
+        targets: Rc<EmitTargets>,
     ) -> LuaMainOutcome {
         if let Some(outcome) = self.terminal_outcome() {
             return outcome;
         }
 
-        self.call_main_ready(&event::ProcessEvent::Timer {
-            timestamp: event::KernelTimestampMillis(timestamp_millis),
-            id: timer.id,
-            eligible_at: event::KernelTimestampMillis(timer.eligible_at),
-        })
+        self.call_main_ready(
+            &event::ProcessEvent::Timer {
+                timestamp: event::KernelTimestampMillis(timestamp_millis),
+                id: timer.id,
+                eligible_at: event::KernelTimestampMillis(timer.eligible_at),
+            },
+            targets,
+        )
     }
 
     pub(crate) fn next_timer_event(&self) -> Option<TimerEvent> {
@@ -691,8 +696,12 @@ impl LuaVm {
         }
     }
 
-    fn call_main_ready(&mut self, event: &event::ProcessEvent) -> LuaMainOutcome {
-        let outcome = self.call_main_once(event);
+    fn call_main_ready(
+        &mut self,
+        event: &event::ProcessEvent,
+        targets: Rc<EmitTargets>,
+    ) -> LuaMainOutcome {
+        let outcome = self.call_main_once(event, targets);
         self.publish_memory();
         if outcome.result.is_err() {
             record_fatal_fault(&self.fatal_fault, LuaVmFatalFault::MainFailed);
@@ -711,7 +720,11 @@ impl LuaVm {
         self.fatal_fault.get().map(LuaVmFatalFault::error_kind)
     }
 
-    fn call_main_once(&self, event: &event::ProcessEvent) -> LuaMainOutcome {
+    fn call_main_once(
+        &self,
+        event: &event::ProcessEvent,
+        targets: Rc<EmitTargets>,
+    ) -> LuaMainOutcome {
         let event = match event::project(&self.lua, event, Rc::clone(&self.fatal_fault)) {
             Ok(event) => event,
             Err(error) => {
@@ -730,7 +743,7 @@ impl LuaVm {
                 };
             }
         };
-        if self.emit_slot.begin_main().is_err() {
+        if self.emit_slot.begin_main(targets).is_err() {
             return LuaMainOutcome {
                 result: Err(self.internal_invariant_error()),
                 emit_boundaries: Vec::new(),
