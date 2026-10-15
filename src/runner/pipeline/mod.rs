@@ -39,14 +39,14 @@ mod target;
 
 pub(super) use control::{RunnerPipelineControl, RunnerPipelineControlSessionError};
 pub(super) use diagnostics::RunnerPipelineDiagnostics;
-pub(super) use directory::{PipelineDirectoryCleanupError, cleanup_pipeline_directory};
+pub(super) use directory::{PipelineCleanupError, cleanup_pipeline_directory};
 pub(super) use launch_registry::{
     RunnerPipelineLaunchRegistry, RunnerPipelineLaunchRegistryCreateError,
 };
 pub(super) use launcher::{
-    PipelineTargetPublication, RunnerPipelineLaunchError, RunnerPipelineLauncher,
-    RunnerPipelineProcess, RunnerPipelineProcessError, RunnerPipelineProcessEvent,
-    RunnerPipelineStartupError, RunnerPipelineStartupFailure,
+    PipelineLaunchResources, PipelineTargetPublication, RunnerPipelineLaunchError,
+    RunnerPipelineLauncher, RunnerPipelineProcess, RunnerPipelineProcessError,
+    RunnerPipelineProcessEvent, RunnerPipelineStartupError, RunnerPipelineStartupFailure,
 };
 pub(super) use runtime_resolution::{RuntimeResolution, RuntimeResolutionIssue, RuntimeResolver};
 pub(super) use target::{PipelineLifecycleTarget, PipelineRunningState};

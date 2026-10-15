@@ -19,7 +19,6 @@
 
 //! Real Runner launch, target control, process recovery, and Queue isolation.
 
-use super::RunnerPipelineLifecycleError;
 use crate::config::RunnerConfig;
 use crate::contracts::core::{PipelineStatusSnapshot, PluginInstanceState};
 use crate::contracts::sink::EgressRecord;
@@ -39,12 +38,9 @@ use crate::runner::diagnostics::RunnerDiagnostics;
 use crate::runner::document_store::TenonDocumentEtag;
 use crate::runner::execution::ExecutionExpiry;
 use crate::runner::management::{PipelineDirective, PipelineLifecycleState};
-use crate::runner::pipeline::PipelineDirectoryCleanupError;
 use crate::runner::pipeline::PipelineLifecycleTarget;
 use crate::runner::pipeline::test_support::{TargetFixture, shell_quote, snapshot};
-use crate::runner::pipeline_supervisor::{
-    PipelineCleanup, PipelineEvent, PipelineSupervisor, PipelineSupervisorError,
-};
+use crate::runner::pipeline_supervisor::{PipelineCleanup, PipelineEvent, PipelineSupervisor};
 use crate::runner::plugin::store::{PluginStoreError, PluginUninstallOutcome};
 use crate::runner::process_resources;
 use crate::runner::test_support::load_config;
@@ -70,6 +66,7 @@ use tokio::time;
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 const TEST_LIMIT: Duration = Duration::from_secs(20);
 
+mod environment;
 #[cfg(not(feature = "loom-model"))]
 mod shutdown_owner_loss;
 
@@ -594,6 +591,12 @@ async fn an_unready_latest_document_blocks_restart_until_corrected() -> TestResu
 #[tokio::test(flavor = "current_thread")]
 async fn directory_cleanup_failure_never_launches_a_second_pipeline() -> TestResult {
     with_fixture(async |fixture| {
+        let healthy = fixture
+            .set(&document("healthy", "A", "normal"))?
+            .ok_or("The target for Pipeline healthy is not ready")?;
+        fixture.running(healthy.document_etag()).await?;
+        let healthy_root = fixture.working_directory(&healthy);
+        let healthy_pids = instance_pids(&healthy_root)?;
         let first = fixture
             .set(&document("cleanup", "A", "delay-shutdown"))?
             .ok_or("A is unready")?;
@@ -611,32 +614,39 @@ async fn directory_cleanup_failure_never_launches_a_second_pipeline() -> TestRes
         // socket remains owned by this test until all child owners are reaped.
         fs::rename(&old_socket, fixture.root.path().join("displaced-control"))?;
         fs::write(&old_socket, b"not a directory")?;
-        fixture.set(&document("cleanup", "C", "normal"))?;
-        let failure = loop {
+        let latest = fixture
+            .set(&document("cleanup", "C", "normal"))?
+            .ok_or("Target C is not ready")?;
+        loop {
             match fixture.supervisor.next_event().await {
+                PipelineEvent::State { update, .. }
+                    if matches!(update.state, PipelineLifecycleState::RestartBackoff(ref error)
+                        if error.code == "runner.pipeline_cleanup_failed") =>
+                {
+                    break;
+                }
                 PipelineEvent::State { .. } => {}
-                PipelineEvent::Failure(failure) => break failure,
+                PipelineEvent::Failure(failure) => return Err(failure.into()),
             }
-        };
-        let PipelineSupervisorError::Lifecycle { source, .. } = failure else {
-            return Err(format!("unexpected supervisor failure: {failure}").into());
-        };
-        assert!(
-            matches!(*source, RunnerPipelineLifecycleError::CleanupAfterRestart {
-            cleanup: PipelineDirectoryCleanupError::Filesystem { ref path, ref source }, ..
-        } if path == &old_socket && source.kind() == io::ErrorKind::NotADirectory)
-        );
+        }
         assert_reaped(pid)?;
         assert!(old_socket.is_file());
         assert!(
             root.is_dir(),
             "Control cleanup failure must preserve the working directory"
         );
-        assert_eq!(fixture.launch_count()?, 1);
-        assert_eq!(
-            fixture.supervisor.shutdown().await.cleanup,
-            PipelineCleanup::Complete
-        );
+        assert_eq!(fixture.launch_count()?, 2);
+        fixture.observe(traffic(&healthy_root, 1)).await?;
+        assert_eq!(instance_pids(&healthy_root)?, healthy_pids);
+        fs::remove_file(&old_socket)?;
+        fs::rename(fixture.root.path().join("displaced-control"), &old_socket)?;
+        fixture.running(latest.document_etag()).await?;
+        assert_eq!(fixture.launch_count()?, 3);
+        assert!(!old_socket.exists());
+        assert!(!root.exists());
+        fixture
+            .observe(traffic(&fixture.working_directory(&latest), 1))
+            .await?;
         Ok(())
     })
     .await

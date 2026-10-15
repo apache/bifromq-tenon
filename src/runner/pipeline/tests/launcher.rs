@@ -17,7 +17,7 @@
  * under the License.
  */
 
-use super::super::PipelineDirectoryCleanupError;
+use super::super::PipelineCleanupError;
 use super::super::test_support::TargetReferenceProbe;
 use super::*;
 use crate::plugin_control_directory;
@@ -202,6 +202,7 @@ async fn start_registers_before_spawn_and_returns_one_process_owner() -> io::Res
         .await
         .map_err(io::Error::other)?;
     assert!(!control_directory.exists());
+    drop(process);
     next_reference.assert_released()?;
     drop(pipeline);
     drop(response);
@@ -593,8 +594,48 @@ async fn spawn_failure_removes_the_pending_launch() -> io::Result<()> {
     Ok(())
 }
 #[tokio::test(flavor = "current_thread")]
-async fn directory_cleanup_failure_releases_reaped_process_references_and_preserves_the_path()
--> io::Result<()> {
+async fn failed_spawn_retains_cleanup_until_the_lifecycle_retries() -> io::Result<()> {
+    let endpoints = endpoints()?;
+    let fixture = LaunchFixture::new()?;
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("control.sock");
+    let launcher = RunnerPipelineLauncher::new(
+        endpoints.launches.clone(),
+        socket.clone(),
+        crate::runner::process_resources::test_support::unavailable(),
+    );
+    let failure = launcher_test_support::start_pipeline_with_spawn(
+        &launcher,
+        &directory.path().join("missing-tenon"),
+        Arc::clone(&fixture.target),
+        &fixture.config,
+        fixture.directory.path(),
+        |_, launch_id| {
+            fs::write(
+                plugin_control_directory(&socket, launch_id).join("external-file"),
+                b"test",
+            )?;
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "spawn denied",
+            ))
+        },
+    )
+    .err()
+    .ok_or_else(|| io::Error::other("The test spawn function did not return an error"))?;
+    let RunnerPipelineLaunchError::LaunchCleanupPending { mut resources, .. } = failure else {
+        return Err(io::Error::other("The launch error has no cleanup owner"));
+    };
+    assert!(launch_registry_test_support::is_empty(&endpoints.launches));
+    assert_eq!(fs::read_dir(directory.path())?.count(), 1);
+    resources.cleanup().await.map_err(io::Error::other)?;
+    assert_eq!(fs::read_dir(directory.path())?.count(), 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn directory_cleanup_failure_retains_reaped_process_references_until_retry() -> io::Result<()>
+{
     let endpoints = endpoints()?;
     let fixture = LaunchFixture::new()?;
     let server = TestServer::start(endpoints.clone()).await?;
@@ -622,12 +663,20 @@ async fn directory_cleanup_failure_releases_reaped_process_references_and_preser
     reference.assert_retained()?;
     let failure = process.cleanup_control_directory().await;
     assert!(
-        matches!(failure, Err(PipelineDirectoryCleanupError::Filesystem { ref path, ref source }) if path == &control_directory && source.kind() == io::ErrorKind::NotADirectory)
+        matches!(failure, Err(PipelineCleanupError::Filesystem { ref path, ref source }) if path == &control_directory && source.kind() == io::ErrorKind::NotADirectory)
     );
+    reference.assert_retained()?;
+    fs::remove_file(&control_directory)?;
+    fs::rename(&displaced, &control_directory)?;
+    process
+        .cleanup_control_directory()
+        .await
+        .map_err(io::Error::other)?;
+    drop(process);
     reference.assert_released()?;
     assert!(launch_registry_test_support::is_empty(&endpoints.launches));
-    assert_eq!(fs::read(&control_directory)?, b"not a directory");
-    assert!(displaced.is_dir());
+    assert!(!control_directory.exists());
+    assert!(!displaced.exists());
     server.finish().await
 }
 

@@ -41,17 +41,17 @@ pub(in crate::runner) use platform::{
     PipelineResourceGroup, RunnerResources, available_cpu_count, requires_replacement,
 };
 
-/// A failed preparation, with a separate failure if the empty group leaked.
+/// A preparation error keeps any group for cleanup.
 pub(in crate::runner) struct ResourcePreparationError {
     pub(in crate::runner) failure: io::Error,
-    pub(in crate::runner) cleanup: Option<io::Error>,
+    pub(in crate::runner) group: Option<PipelineResourceGroup>,
 }
 
 impl From<io::Error> for ResourcePreparationError {
     fn from(failure: io::Error) -> Self {
         Self {
             failure,
-            cleanup: None,
+            group: None,
         }
     }
 }

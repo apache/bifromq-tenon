@@ -390,7 +390,6 @@ fn shutdown_error_identifies_its_deadline_and_remaining_cleanup_responsibility()
         "injected deadline cleanup failure",
     ));
     assert!(timeout.deadline_elapsed());
-    assert!(timeout.requires_cleanup_retry());
 
     let recovered_before_deadline = PipelineShutdownError::BeforeDeadline {
         operation: "Injected shutdown operation failed",
@@ -398,7 +397,6 @@ fn shutdown_error_identifies_its_deadline_and_remaining_cleanup_responsibility()
         cleanup: None,
     };
     assert!(!recovered_before_deadline.deadline_elapsed());
-    assert!(!recovered_before_deadline.requires_cleanup_retry());
 
     let unrecovered_before_deadline = PipelineShutdownError::BeforeDeadline {
         operation: "Injected shutdown operation failed",
@@ -406,5 +404,4 @@ fn shutdown_error_identifies_its_deadline_and_remaining_cleanup_responsibility()
         cleanup: Some(io::Error::other("injected cleanup failure")),
     };
     assert!(!unrecovered_before_deadline.deadline_elapsed());
-    assert!(unrecovered_before_deadline.requires_cleanup_retry());
 }

@@ -48,7 +48,7 @@ impl PipelineResourceGroup {
         Ok(())
     }
 
-    pub(in crate::runner) fn discard_empty(self) -> io::Result<()> {
+    pub(in crate::runner) fn discard_empty(&self) -> io::Result<()> {
         Ok(())
     }
 }

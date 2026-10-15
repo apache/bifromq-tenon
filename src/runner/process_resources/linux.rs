@@ -98,8 +98,13 @@ impl PipelineResourceGroup {
             attach_before_exec(command, &path)
         })();
         if let Err(failure) = prepared {
-            let cleanup = fs::remove_dir(&path).err();
-            return Err(ResourcePreparationError { failure, cleanup });
+            return Err(ResourcePreparationError {
+                failure,
+                group: Some(Self {
+                    path,
+                    _scope: scope,
+                }),
+            });
         }
         Ok(Some(Self {
             path,
@@ -111,7 +116,7 @@ impl PipelineResourceGroup {
         kill_and_remove(&self.path).await
     }
 
-    pub(in crate::runner) fn discard_empty(self) -> io::Result<()> {
+    pub(in crate::runner) fn discard_empty(&self) -> io::Result<()> {
         fs::remove_dir(&self.path)
     }
 }
@@ -252,7 +257,12 @@ fn attach_before_exec(command: &mut Command, path: &Path) -> io::Result<()> {
 }
 
 async fn kill_and_remove(path: &Path) -> io::Result<()> {
-    fs::write(path.join("cgroup.kill"), "1")?;
+    match fs::write(path.join("cgroup.kill"), "1") {
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !path.try_exists()? => {
+            return Ok(());
+        }
+        result => result?,
+    }
     // Kernel teardown can outlive SIGKILL; a stuck task must leave its files for
     // recovery instead of allowing an unbounded restart or deleting live mappings.
     tokio::time::timeout(Duration::from_secs(5), async {

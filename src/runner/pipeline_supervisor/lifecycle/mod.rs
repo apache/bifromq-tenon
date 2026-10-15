@@ -19,6 +19,7 @@
 
 //! Owns one ready Tenon Document's restartable Pipeline lifecycle.
 
+mod cleanup;
 mod failure;
 
 use super::{PipelineExecutionAdmission, PipelineLifecycleControl};
@@ -28,15 +29,15 @@ use crate::runner::document_store;
 use crate::runner::execution::ExecutionExpiry;
 use crate::runner::management::{PipelineLifecycleState, PipelineStateUpdate};
 use crate::runner::pipeline::{
-    PipelineDirectoryCleanupError, PipelineLifecycleTarget, PipelineTargetPublication,
-    RunnerPipelineControlSessionError, RunnerPipelineLaunchError, RunnerPipelineLauncher,
-    RunnerPipelineProcess, RunnerPipelineProcessError, RunnerPipelineProcessEvent,
-    cleanup_pipeline_directory,
+    PipelineLifecycleTarget, PipelineTargetPublication, RunnerPipelineControlSessionError,
+    RunnerPipelineLaunchError, RunnerPipelineLauncher, RunnerPipelineProcess,
+    RunnerPipelineProcessError, RunnerPipelineProcessEvent,
 };
 use crate::runner::process_tree::PipelineShutdownOutcome;
+use cleanup::CleanupTarget;
 use document_store::TenonDocumentEtag;
+use failure::PipelineRestartCause;
 pub(in crate::runner) use failure::RunnerPipelineLifecycleError;
-use failure::{PipelineRestartCause, ProcessCleanupFailure};
 use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
@@ -103,7 +104,9 @@ pub(super) fn run_pipeline_lifecycle(
                 || input.execution_admission_is_closed()
                 || context.execution_expiry.is_expired()
             {
-                PipelineAttemptOutcome::Stopped(PipelineShutdownOutcome::ExitedBeforeDeadline)
+                PipelineAttemptOutcome::Stopped {
+                    shutdown_timed_out: false,
+                }
             } else {
                 match context.launcher.start_pipeline(
                     &context.pipeline_executable,
@@ -121,10 +124,10 @@ pub(super) fn run_pipeline_lifecycle(
                         let outcome = match result {
                             Ok(outcome) => outcome,
                             Err(primary) => {
-                                return Err(match process.cleanup_resource_group().await {
+                                return Err(match process.cleanup().await {
                                     Ok(()) => primary,
                                     Err(cleanup) => {
-                                        RunnerPipelineLifecycleError::ResourceCleanupAfterFailure {
+                                        RunnerPipelineLifecycleError::CleanupAfterFailure {
                                             primary: Box::new(primary),
                                             cleanup,
                                         }
@@ -132,12 +135,32 @@ pub(super) fn run_pipeline_lifecycle(
                                 });
                             }
                         };
-                        outcome.with_directory_cleanup(process.cleanup_control_directory().await)?
+                        outcome.with_cleanup(
+                            context
+                                .cleanup_with_retry(
+                                    &document_id,
+                                    &identity,
+                                    CleanupTarget::Process(&mut process),
+                                )
+                                .await,
+                        )?
                     }
-                    Err(
-                        error @ (RunnerPipelineLaunchError::SpawnFailed(_)
-                        | RunnerPipelineLaunchError::ResourceLimits(_)),
-                    ) => {
+                    Err(error @ RunnerPipelineLaunchError::ProcessTreeOwnershipFailed(_)) => {
+                        return Err(RunnerPipelineLifecycleError::Launch(error));
+                    }
+                    Err(mut error) => {
+                        if let RunnerPipelineLaunchError::LaunchCleanupPending {
+                            resources, ..
+                        } = &mut error
+                        {
+                            context
+                                .cleanup_with_retry(
+                                    &document_id,
+                                    &identity,
+                                    CleanupTarget::Launch(resources),
+                                )
+                                .await?;
+                        }
                         context
                             .publish_restart(
                                 &document_id,
@@ -147,24 +170,33 @@ pub(super) fn run_pipeline_lifecycle(
                             )
                             .await?
                     }
-                    Err(error) => return Err(RunnerPipelineLifecycleError::Launch(error)),
                 }
             };
 
-            match outcome
-                .with_directory_cleanup(cleanup_pipeline_directory(working_directory).await)?
-            {
-                PipelineAttemptOutcome::Stopped(PipelineShutdownOutcome::ExitedBeforeDeadline) => {
+            match outcome.with_cleanup(
+                context
+                    .cleanup_with_retry(
+                        &document_id,
+                        &identity,
+                        CleanupTarget::Directory(&working_directory),
+                    )
+                    .await,
+            )? {
+                PipelineAttemptOutcome::Stopped {
+                    shutdown_timed_out: false,
+                } => {
                     return Ok(PipelineLifecycleCompletion::Stopped);
                 }
-                PipelineAttemptOutcome::Stopped(PipelineShutdownOutcome::ForcedAfterDeadline) => {
+                PipelineAttemptOutcome::Stopped {
+                    shutdown_timed_out: true,
+                } => {
                     return Ok(PipelineLifecycleCompletion::ShutdownTimedOut);
                 }
                 PipelineAttemptOutcome::Restart(cause) => {
                     cause.log_creation_failure(&document_id);
                     next_attempt = NextAttempt::RetryAfter(backoff.take_next());
                 }
-                PipelineAttemptOutcome::Replace(_) => {
+                PipelineAttemptOutcome::Replace { .. } => {
                     // The old process is gone even when the newest target is unready.
                     publish_state(
                         &context.state_updates,
@@ -187,6 +219,7 @@ pub(super) struct PipelineLifecycleContext {
     launcher: RunnerPipelineLauncher,
     state_updates: mpsc::Sender<PipelineLifecycleUpdate>,
     execution_expiry: ExecutionExpiry,
+    runner_shutdown: watch::Sender<bool>,
 }
 
 impl PipelineLifecycleContext {
@@ -205,7 +238,12 @@ impl PipelineLifecycleContext {
             launcher,
             state_updates,
             execution_expiry,
+            runner_shutdown: watch::channel(false).0,
         }
+    }
+
+    pub(super) fn stop_cleanup_retries(&self) {
+        self.runner_shutdown.send_replace(true);
     }
 
     async fn run_launched_attempt(
@@ -219,18 +257,11 @@ impl PipelineLifecycleContext {
             biased;
             _ = &mut input.shutdown_requested => {
                 return self
-                    .stop_pipeline(process)
+                    .stop_pipeline(process, document_id)
                     .await;
             }
             result = process.wait_for_attachment() => match result {
                 Ok(()) => {},
-                Err(error) if error.requires_cleanup_retry() => {
-                    let retry = process.force_kill_and_reap().await;
-                    return Err(RunnerPipelineLifecycleError::LaunchCleanupRetried {
-                        primary: error,
-                        retry,
-                    });
-                }
                 Err(error) => {
                     return self
                         .publish_restart(
@@ -247,18 +278,11 @@ impl PipelineLifecycleContext {
             biased;
             _ = &mut input.shutdown_requested => {
                 return self
-                    .stop_pipeline(process)
+                    .stop_pipeline(process, document_id)
                     .await;
             }
             result = process.wait_for_startup_status() => match result {
                 Ok(status) => status,
-                Err(error) if error.requires_cleanup_retry() => {
-                    let retry = process.force_kill_and_reap().await;
-                    return Err(RunnerPipelineLifecycleError::StartupCleanupRetried {
-                        primary: error,
-                        retry,
-                    });
-                }
                 Err(error) => {
                     return self
                         .publish_restart(
@@ -280,15 +304,15 @@ impl PipelineLifecycleContext {
         .await
         .is_err()
         {
-            return self.finish_state_receiver_failure(process).await;
+            return Err(RunnerPipelineLifecycleError::StateReceiverClosed);
         }
         if input.execution_admission_is_closed() || self.execution_expiry.is_expired() {
-            return self.stop_pipeline(process).await;
+            return self.stop_pipeline(process, document_id).await;
         }
         match input.publish_latest_target(process) {
             Ok(PipelineTargetPublication::Published) => {}
             Ok(PipelineTargetPublication::ReplaceProcess) => {
-                return self.replace_pipeline(process).await;
+                return self.replace_pipeline(process, document_id).await;
             }
             Err(error) => {
                 let primary =
@@ -304,21 +328,21 @@ impl PipelineLifecycleContext {
                 biased;
                 _ = &mut input.shutdown_requested => {
                     return self
-                        .stop_pipeline(process)
+                        .stop_pipeline(process, document_id)
                         .await;
                 }
                 changed = input.target_updates.changed() => {
                     if changed.is_err() {
                         return self
-                            .stop_pipeline(process)
+                            .stop_pipeline(process, document_id)
                             .await;
                     }
                     if input.execution_admission_is_closed() || self.execution_expiry.is_expired() {
-                        return self.stop_pipeline(process).await;
+                        return self.stop_pipeline(process, document_id).await;
                     }
                     match input.publish_latest_target(process) {
                         Ok(PipelineTargetPublication::Published) => {},
-                        Ok(PipelineTargetPublication::ReplaceProcess) => return self.replace_pipeline(process).await,
+                        Ok(PipelineTargetPublication::ReplaceProcess) => return self.replace_pipeline(process, document_id).await,
                         Err(error) => {
                             let primary = PipelineRestartCause::Runtime(RunnerPipelineProcessError::Control(error));
                             return self.invalidate_and_finish_attempt(process, document_id, identity, primary).await;
@@ -339,7 +363,7 @@ impl PipelineLifecycleContext {
                     .await
                     .is_err()
                     {
-                        return self.finish_state_receiver_failure(process).await;
+                        return Err(RunnerPipelineLifecycleError::StateReceiverClosed);
                     }
                 }
                 Ok(RunnerPipelineProcessEvent::Exited(status)) => {
@@ -365,47 +389,36 @@ impl PipelineLifecycleContext {
     async fn replace_pipeline(
         &self,
         process: &mut RunnerPipelineProcess,
+        document_id: &TenonDocumentId,
     ) -> Result<PipelineAttemptOutcome, RunnerPipelineLifecycleError> {
-        let PipelineAttemptOutcome::Stopped(outcome) = self.stop_pipeline(process).await? else {
+        let PipelineAttemptOutcome::Stopped { shutdown_timed_out } =
+            self.stop_pipeline(process, document_id).await?
+        else {
             unreachable!("stopping a process returns only its shutdown outcome");
         };
-        Ok(PipelineAttemptOutcome::Replace(outcome))
+        Ok(PipelineAttemptOutcome::Replace { shutdown_timed_out })
     }
 
     async fn stop_pipeline(
         &self,
         owner: &mut RunnerPipelineProcess,
+        document_id: &TenonDocumentId,
     ) -> Result<PipelineAttemptOutcome, RunnerPipelineLifecycleError> {
-        match owner
+        let shutdown_timed_out = match owner
             .terminate_and_reap(self.config.pipeline_shutdown_timeout())
             .await
         {
-            Ok(outcome) => Ok(PipelineAttemptOutcome::Stopped(outcome)),
-            Err(primary) if primary.requires_cleanup_retry() => {
-                let retry = owner.force_kill_and_reap().await;
-                if retry.is_ok() && primary.deadline_elapsed() {
-                    Ok(PipelineAttemptOutcome::Stopped(
-                        PipelineShutdownOutcome::ForcedAfterDeadline,
-                    ))
-                } else {
-                    Err(RunnerPipelineLifecycleError::ShutdownCleanupRetried { primary, retry })
-                }
+            Ok(outcome) => matches!(outcome, PipelineShutdownOutcome::ForcedAfterDeadline),
+            Err(error) => {
+                eprintln!(
+                    "runner.pipeline_cleanup_failed: Pipeline {document_id}: {}",
+                    crate::error::ErrorChain(&error)
+                );
+                error.deadline_elapsed()
             }
-            Err(primary) => Err(RunnerPipelineLifecycleError::Shutdown(primary)),
-        }
-    }
-
-    async fn finish_attempt_failure(
-        &self,
-        process: &mut RunnerPipelineProcess,
-        primary: PipelineRestartCause,
-    ) -> Result<PipelineAttemptOutcome, RunnerPipelineLifecycleError> {
-        match force_cleanup_with_one_retry(process).await {
-            Ok(()) => Ok(PipelineAttemptOutcome::Restart(primary)),
-            Err(cleanup) => {
-                Err(RunnerPipelineLifecycleError::AttemptCleanupAfterFailure { primary, cleanup })
-            }
-        }
+        };
+        // The attempt must still complete cleanup before the lifecycle returns.
+        Ok(PipelineAttemptOutcome::Stopped { shutdown_timed_out })
     }
 
     async fn invalidate_and_finish_attempt(
@@ -421,19 +434,9 @@ impl PipelineLifecycleContext {
             .await
             .is_err()
         {
-            return self.finish_state_receiver_failure(process).await;
+            return Err(RunnerPipelineLifecycleError::StateReceiverClosed);
         }
-        self.finish_attempt_failure(process, primary).await
-    }
-
-    async fn finish_state_receiver_failure(
-        &self,
-        process: &mut RunnerPipelineProcess,
-    ) -> Result<PipelineAttemptOutcome, RunnerPipelineLifecycleError> {
-        Err(match force_cleanup_with_one_retry(process).await {
-            Ok(()) => RunnerPipelineLifecycleError::StateReceiverClosed,
-            Err(cleanup) => RunnerPipelineLifecycleError::StateReceiverCleanupAfterFailure(cleanup),
-        })
+        Ok(PipelineAttemptOutcome::Restart(primary))
     }
 
     async fn publish_restart(
@@ -463,6 +466,7 @@ impl Clone for PipelineLifecycleContext {
             launcher: self.launcher.clone(),
             state_updates: self.state_updates.clone(),
             execution_expiry: self.execution_expiry.clone(),
+            runner_shutdown: self.runner_shutdown.clone(),
         }
     }
 }
@@ -476,18 +480,6 @@ impl fmt::Debug for PipelineLifecycleContext {
             .field("launcher", &self.launcher)
             .finish_non_exhaustive()
     }
-}
-
-async fn force_cleanup_with_one_retry(
-    process: &mut RunnerPipelineProcess,
-) -> Result<(), ProcessCleanupFailure> {
-    let Err(initial) = process.force_kill_and_reap().await else {
-        return Ok(());
-    };
-    Err(ProcessCleanupFailure {
-        initial,
-        retry: process.force_kill_and_reap().await,
-    })
 }
 
 async fn publish_state(
@@ -632,8 +624,8 @@ impl RetryBackoffSequence {
 }
 
 enum PipelineAttemptOutcome {
-    Stopped(PipelineShutdownOutcome),
-    Replace(PipelineShutdownOutcome),
+    Stopped { shutdown_timed_out: bool },
+    Replace { shutdown_timed_out: bool },
     Restart(PipelineRestartCause),
 }
 
@@ -644,22 +636,30 @@ enum NextAttempt {
 }
 
 impl PipelineAttemptOutcome {
-    fn with_directory_cleanup(
+    fn with_cleanup(
         self,
-        cleanup: Result<(), PipelineDirectoryCleanupError>,
+        cleanup: Result<(), RunnerPipelineLifecycleError>,
     ) -> Result<Self, RunnerPipelineLifecycleError> {
         let Err(cleanup) = cleanup else {
             return Ok(self);
         };
+        let cleanup = match cleanup {
+            RunnerPipelineLifecycleError::Cleanup(cleanup) => cleanup,
+            error => return Err(error),
+        };
         Err(match self {
-            Self::Stopped(PipelineShutdownOutcome::ExitedBeforeDeadline)
-            | Self::Replace(PipelineShutdownOutcome::ExitedBeforeDeadline) => {
-                RunnerPipelineLifecycleError::DirectoryCleanup(cleanup)
+            Self::Stopped {
+                shutdown_timed_out: false,
             }
-            Self::Stopped(PipelineShutdownOutcome::ForcedAfterDeadline)
-            | Self::Replace(PipelineShutdownOutcome::ForcedAfterDeadline) => {
-                RunnerPipelineLifecycleError::DirectoryCleanupAfterShutdownTimeout(cleanup)
+            | Self::Replace {
+                shutdown_timed_out: false,
+            } => RunnerPipelineLifecycleError::Cleanup(cleanup),
+            Self::Stopped {
+                shutdown_timed_out: true,
             }
+            | Self::Replace {
+                shutdown_timed_out: true,
+            } => RunnerPipelineLifecycleError::CleanupAfterShutdownTimeout(cleanup),
             Self::Restart(primary) => RunnerPipelineLifecycleError::CleanupAfterRestart {
                 primary: Box::new(primary),
                 cleanup,

@@ -23,9 +23,8 @@ use super::{
 };
 use crate::payload_contract::PluginInterface;
 use crate::runner::pipeline::test_support::TargetReferenceProbe;
-use crate::runner::pipeline::{PipelineDirectoryCleanupError, cleanup_pipeline_directory};
+use crate::runner::pipeline::{PipelineCleanupError, cleanup_pipeline_directory};
 use crate::runner::pipeline_supervisor::lifecycle::test_support::target;
-use crate::runner::process_tree::PipelineShutdownOutcome;
 use crate::runner::test_support::{install_plugin, load_config};
 use std::io;
 use std::sync::Arc;
@@ -188,16 +187,22 @@ async fn directory_cleanup_failure_preserves_the_shutdown_timeout() -> io::Resul
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("not-a-directory");
     std::fs::write(&path, [])?;
-    let outcome = PipelineAttemptOutcome::Stopped(PipelineShutdownOutcome::ForcedAfterDeadline);
+    let outcome = PipelineAttemptOutcome::Stopped {
+        shutdown_timed_out: true,
+    };
     let failure = outcome
-        .with_directory_cleanup(cleanup_pipeline_directory(path.clone()).await)
+        .with_cleanup(
+            cleanup_pipeline_directory(path.clone())
+                .await
+                .map_err(RunnerPipelineLifecycleError::Cleanup),
+        )
         .err()
         .ok_or_else(|| io::Error::other("Directory cleanup unexpectedly succeeded"))?;
     assert!(failure.includes_shutdown_timeout());
     assert!(failure.process_owner_recovered());
     assert!(
-        matches!(failure, RunnerPipelineLifecycleError::DirectoryCleanupAfterShutdownTimeout(
-        PipelineDirectoryCleanupError::Filesystem { path: failed_path, source }
+        matches!(failure, RunnerPipelineLifecycleError::CleanupAfterShutdownTimeout(
+        PipelineCleanupError::Filesystem { path: failed_path, source }
     ) if failed_path == path && source.kind() == io::ErrorKind::NotADirectory)
     );
     Ok(())

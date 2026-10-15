@@ -59,7 +59,13 @@ Use SIGINT or SIGTERM for normal shutdown. Allow enough time for the configured 
 
 Document deletion starts Pipeline shutdown. If the Pipeline does not stop before its deadline, the Runner sends `SIGKILL` to the old process group. It waits for the Pipeline process to exit and removes its working directory. It writes `runner.pipeline_shutdown_timed_out` to stderr and continues to serve other Documents. If the same Document is created during shutdown, its new Pipeline starts after these cleanup steps.
 
-This timeout does not change the exit status of a subsequent normal Runner shutdown. Cleanup errors and internal failures can still stop the Runner with a nonzero exit status.
+This timeout does not change the exit status of a subsequent normal Runner shutdown. Internal failures can still stop the Runner with a nonzero exit status.
+
+Errors from filesystem or process operations during Pipeline startup or cleanup do not stop the Runner. The Runner writes the error to stderr. It tries cleanup again with the configured Pipeline retry backoff. It keeps the resources until it completes cleanup.
+
+Other Pipelines continue to run. The Pipeline with the error cannot start a replacement process before the Runner completes cleanup. The Runner uses these steps when a Document is deleted and then created again.
+
+The Runner writes `runner.pipeline_cleanup_failed` for a cleanup error. It shows `restart-backoff` for an active Pipeline during cleanup retries. If you send SIGINT or SIGTERM before the Runner completes cleanup, it writes any remaining error to stderr. If the Runner cannot complete process or resource-group cleanup, it keeps runtime files. These remaining resources can prevent the next Runner startup.
 
 ## Transport and access
 

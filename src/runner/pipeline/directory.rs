@@ -32,27 +32,35 @@ use tokio::task::{self, JoinError};
 /// Returns the blocking task or filesystem failure if removal cannot complete.
 pub(in crate::runner) async fn cleanup_pipeline_directory(
     path: PathBuf,
-) -> Result<(), PipelineDirectoryCleanupError> {
+) -> Result<(), PipelineCleanupError> {
     task::spawn_blocking(move || match fs::remove_dir_all(&path) {
         Ok(()) => Ok(()),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(PipelineDirectoryCleanupError::Filesystem { path, source }),
+        Err(source) => Err(PipelineCleanupError::Filesystem { path, source }),
     })
     .await
-    .map_err(PipelineDirectoryCleanupError::Task)?
+    .map_err(PipelineCleanupError::Task)?
 }
 
-/// Failure to remove one Pipeline directory after process cleanup.
+/// Failure to release one Pipeline's processes, resource group, or directory.
 #[derive(Debug)]
-pub(in crate::runner) enum PipelineDirectoryCleanupError {
+pub(in crate::runner) enum PipelineCleanupError {
+    Process(io::Error),
     ResourceGroup(io::Error),
     Task(JoinError),
     Filesystem { path: PathBuf, source: io::Error },
 }
 
-impl fmt::Display for PipelineDirectoryCleanupError {
+impl PipelineCleanupError {
+    pub(in crate::runner) const fn process_owner_recovered(&self) -> bool {
+        !matches!(self, Self::Process(_) | Self::ResourceGroup(_))
+    }
+}
+
+impl fmt::Display for PipelineCleanupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Process(_) => formatter.write_str("Pipeline process cleanup error"),
             Self::ResourceGroup(_) => formatter.write_str("Pipeline resource group cleanup failed"),
             Self::Task(_) => formatter.write_str("Pipeline directory cleanup task failed"),
             Self::Filesystem { path, .. } => write!(
@@ -64,10 +72,10 @@ impl fmt::Display for PipelineDirectoryCleanupError {
     }
 }
 
-impl Error for PipelineDirectoryCleanupError {
+impl Error for PipelineCleanupError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::ResourceGroup(source) => Some(source),
+            Self::Process(source) | Self::ResourceGroup(source) => Some(source),
             Self::Task(source) => Some(source),
             Self::Filesystem { source, .. } => Some(source),
         }

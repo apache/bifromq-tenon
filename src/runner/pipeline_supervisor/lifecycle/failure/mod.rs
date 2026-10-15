@@ -24,13 +24,11 @@ use crate::identifiers::TenonDocumentId;
 use crate::runner::document_store::TenonDocumentEtag;
 use crate::runner::management::PipelineAttemptError;
 use crate::runner::pipeline::{
-    PipelineDirectoryCleanupError, RunnerPipelineLaunchError, RunnerPipelineProcessError,
+    PipelineCleanupError, RunnerPipelineLaunchError, RunnerPipelineProcessError,
     RunnerPipelineStartupError, RunnerPipelineStartupFailure,
 };
-use crate::runner::process_tree::PipelineShutdownError;
 use std::error::Error;
 use std::fmt;
-use std::io;
 use std::process::ExitStatus;
 
 #[derive(Debug)]
@@ -43,13 +41,7 @@ pub(in crate::runner) enum PipelineRestartCause {
 
 impl PipelineRestartCause {
     pub(super) fn log_creation_failure(&self, document_id: &TenonDocumentId) {
-        if matches!(
-            self,
-            Self::Launch(
-                RunnerPipelineLaunchError::ResourceLimits(_)
-                    | RunnerPipelineLaunchError::SpawnFailed(_)
-            )
-        ) {
+        if matches!(self, Self::Launch(_)) {
             eprintln!(
                 "{}: Pipeline {}: {}",
                 self.code(),
@@ -120,83 +112,44 @@ impl Error for PipelineRestartCause {
     }
 }
 
-/// A fatal failure while Runner owns one exact Pipeline lifecycle.
+/// An internal failure, or a cleanup error during Runner shutdown.
 #[derive(Debug)]
 pub(in crate::runner) enum RunnerPipelineLifecycleError {
-    ResourceCleanupAfterFailure {
+    CleanupAfterFailure {
         primary: Box<Self>,
-        cleanup: io::Error,
+        cleanup: PipelineCleanupError,
     },
-    /// Synchronous launch failed before it returned a process owner.
     Launch(RunnerPipelineLaunchError),
-    LaunchCleanupRetried {
-        primary: RunnerPipelineLaunchError,
-        retry: io::Result<()>,
-    },
-    StartupCleanupRetried {
-        primary: RunnerPipelineStartupError,
-        retry: io::Result<()>,
-    },
-    Shutdown(PipelineShutdownError),
-    ShutdownCleanupRetried {
-        primary: PipelineShutdownError,
-        retry: io::Result<()>,
-    },
-    AttemptCleanupAfterFailure {
-        primary: PipelineRestartCause,
-        cleanup: ProcessCleanupFailure,
-    },
-    DirectoryCleanup(PipelineDirectoryCleanupError),
-    DirectoryCleanupAfterShutdownTimeout(PipelineDirectoryCleanupError),
+    Cleanup(PipelineCleanupError),
+    CleanupAfterShutdownTimeout(PipelineCleanupError),
     CleanupAfterRestart {
         primary: Box<PipelineRestartCause>,
-        cleanup: PipelineDirectoryCleanupError,
+        cleanup: PipelineCleanupError,
     },
     StateReceiverClosed,
-    StateReceiverCleanupAfterFailure(ProcessCleanupFailure),
 }
 
 impl RunnerPipelineLifecycleError {
     pub(in crate::runner::pipeline_supervisor) const fn includes_shutdown_timeout(&self) -> bool {
         match self {
-            Self::ResourceCleanupAfterFailure { primary, .. } => {
-                primary.includes_shutdown_timeout()
-            }
-            Self::Shutdown(error) | Self::ShutdownCleanupRetried { primary: error, .. } => {
-                error.deadline_elapsed()
-            }
-            Self::DirectoryCleanupAfterShutdownTimeout(_) => true,
+            Self::CleanupAfterFailure { primary, .. } => primary.includes_shutdown_timeout(),
+            Self::CleanupAfterShutdownTimeout(_) => true,
             Self::Launch(_)
-            | Self::LaunchCleanupRetried { .. }
-            | Self::StartupCleanupRetried { .. }
-            | Self::AttemptCleanupAfterFailure { .. }
-            | Self::DirectoryCleanup(_)
+            | Self::Cleanup(_)
             | Self::CleanupAfterRestart { .. }
-            | Self::StateReceiverClosed
-            | Self::StateReceiverCleanupAfterFailure(_) => false,
+            | Self::StateReceiverClosed => false,
         }
     }
 
     pub(in crate::runner::pipeline_supervisor) const fn process_owner_recovered(&self) -> bool {
         match self {
-            Self::ResourceCleanupAfterFailure { .. } => false,
-            // A spawn failure can also carry a directory cleanup error, without
-            // any child to reap. Only adoption failure leaves an unowned process.
-            Self::Launch(error) => !matches!(
-                error,
-                RunnerPipelineLaunchError::ProcessTreeOwnershipFailed(_)
-            ),
-            Self::LaunchCleanupRetried { retry, .. }
-            | Self::StartupCleanupRetried { retry, .. }
-            | Self::ShutdownCleanupRetried { retry, .. } => retry.is_ok(),
-            Self::AttemptCleanupAfterFailure { cleanup, .. }
-            | Self::StateReceiverCleanupAfterFailure(cleanup) => cleanup.retry.is_ok(),
-            Self::Shutdown(error) => !error.requires_cleanup_retry(),
-            Self::DirectoryCleanup(cleanup)
-            | Self::DirectoryCleanupAfterShutdownTimeout(cleanup)
-            | Self::CleanupAfterRestart { cleanup, .. } => {
-                !matches!(cleanup, PipelineDirectoryCleanupError::ResourceGroup(_))
+            Self::CleanupAfterFailure { primary, cleanup } => {
+                primary.process_owner_recovered() && cleanup.process_owner_recovered()
             }
+            Self::Launch(_) => false,
+            Self::Cleanup(cleanup)
+            | Self::CleanupAfterShutdownTimeout(cleanup)
+            | Self::CleanupAfterRestart { cleanup, .. } => cleanup.process_owner_recovered(),
             Self::StateReceiverClosed => true,
         }
     }
@@ -205,96 +158,29 @@ impl RunnerPipelineLifecycleError {
 impl fmt::Display for RunnerPipelineLifecycleError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ResourceCleanupAfterFailure { primary, cleanup } => write!(
+            Self::CleanupAfterFailure { primary, cleanup } => write!(
                 formatter,
-                "{}; resource group cleanup also failed: {}",
+                "{}; cleanup error: {}",
                 ErrorChain(primary.as_ref()),
-                ErrorChain(cleanup)
+                ErrorChain(cleanup),
             ),
-            Self::Launch(_) | Self::LaunchCleanupRetried { retry: Ok(()), .. } => {
-                formatter.write_str("Pipeline lifecycle could not continue after launch")
-            }
-            Self::LaunchCleanupRetried {
-                primary,
-                retry: Err(cleanup),
-            } => write!(
-                formatter,
-                "Pipeline process owner remained unrecovered after launch: {}; process cleanup retry also failed: {}",
-                ErrorChain(primary),
-                ErrorChain(cleanup)
-            ),
-            Self::StartupCleanupRetried { retry: Ok(()), .. } => {
-                formatter.write_str("Pipeline lifecycle could not continue after startup")
-            }
-            Self::StartupCleanupRetried {
-                primary,
-                retry: Err(cleanup),
-            } => write!(
-                formatter,
-                "Pipeline process owner remained unrecovered after startup: {}; process cleanup retry also failed: {}",
-                ErrorChain(primary),
-                ErrorChain(cleanup)
-            ),
-            Self::Shutdown(_) | Self::ShutdownCleanupRetried { retry: Ok(()), .. } => {
-                formatter.write_str("Pipeline lifecycle could not complete planned shutdown")
-            }
-            Self::ShutdownCleanupRetried {
-                primary,
-                retry: Err(cleanup),
-            } => write!(
-                formatter,
-                "Pipeline process owner remained unrecovered after planned shutdown: {}; process cleanup retry also failed: {}",
-                ErrorChain(primary),
-                ErrorChain(cleanup)
-            ),
-            Self::AttemptCleanupAfterFailure { primary, cleanup } => match &cleanup.retry {
-                Ok(()) => write!(
-                    formatter,
-                    "{}: {}; Pipeline process cleanup also failed: {}",
-                    primary.code(),
-                    ErrorChain(primary),
-                    ErrorChain(&cleanup.initial)
-                ),
-                Err(retry) => write!(
-                    formatter,
-                    "{}: {}; Pipeline process cleanup failed: {}; cleanup retry also failed: {}",
-                    primary.code(),
-                    ErrorChain(primary),
-                    ErrorChain(&cleanup.initial),
-                    ErrorChain(retry)
-                ),
-            },
-            Self::DirectoryCleanup(_) => {
-                formatter.write_str("Pipeline lifecycle could not remove its working directory")
-            }
-            Self::DirectoryCleanupAfterShutdownTimeout(error) => write!(
+            Self::Launch(_) => formatter.write_str("Pipeline process ownership error"),
+            Self::Cleanup(_) => formatter.write_str("Pipeline cleanup did not complete"),
+            Self::CleanupAfterShutdownTimeout(error) => write!(
                 formatter,
                 "Pipeline shutdown exceeded its deadline; {}",
-                ErrorChain(error)
+                ErrorChain(error),
             ),
             Self::CleanupAfterRestart { primary, cleanup } => write!(
                 formatter,
                 "{}: {}; {}",
                 primary.code(),
                 ErrorChain(primary.as_ref()),
-                ErrorChain(cleanup)
+                ErrorChain(cleanup),
             ),
             Self::StateReceiverClosed => {
                 formatter.write_str("Runner Pipeline state receiver closed")
             }
-            Self::StateReceiverCleanupAfterFailure(cleanup) => match &cleanup.retry {
-                Ok(()) => write!(
-                    formatter,
-                    "Runner Pipeline state receiver closed; process cleanup initially failed: {}",
-                    ErrorChain(&cleanup.initial)
-                ),
-                Err(retry) => write!(
-                    formatter,
-                    "Runner Pipeline state receiver closed; process cleanup failed: {}; cleanup retry also failed: {}",
-                    ErrorChain(&cleanup.initial),
-                    ErrorChain(retry)
-                ),
-            },
         }
     }
 }
@@ -302,45 +188,14 @@ impl fmt::Display for RunnerPipelineLifecycleError {
 impl Error for RunnerPipelineLifecycleError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::ResourceCleanupAfterFailure { .. } => None,
-            Self::Launch(source)
-            | Self::LaunchCleanupRetried {
-                primary: source,
-                retry: Ok(()),
-            } => Some(source),
-            Self::StartupCleanupRetried {
-                primary: source,
-                retry: Ok(()),
-            } => Some(source),
-            Self::Shutdown(source)
-            | Self::ShutdownCleanupRetried {
-                primary: source,
-                retry: Ok(()),
-            } => Some(source),
-            Self::DirectoryCleanup(source) => Some(source),
-            Self::StateReceiverCleanupAfterFailure(ProcessCleanupFailure {
-                initial,
-                retry: Ok(()),
-            }) => Some(initial),
-            Self::LaunchCleanupRetried { retry: Err(_), .. }
-            | Self::StartupCleanupRetried { retry: Err(_), .. }
-            | Self::ShutdownCleanupRetried { retry: Err(_), .. }
-            | Self::AttemptCleanupAfterFailure { .. }
-            | Self::DirectoryCleanupAfterShutdownTimeout(_)
+            Self::Launch(source) => Some(source),
+            Self::Cleanup(source) => Some(source),
+            Self::CleanupAfterFailure { .. }
+            | Self::CleanupAfterShutdownTimeout(_)
             | Self::CleanupAfterRestart { .. }
-            | Self::StateReceiverClosed
-            | Self::StateReceiverCleanupAfterFailure(ProcessCleanupFailure {
-                retry: Err(_), ..
-            }) => None,
+            | Self::StateReceiverClosed => None,
         }
     }
-}
-
-/// The initial cleanup failure and the later retry's independent result.
-#[derive(Debug)]
-pub(in crate::runner) struct ProcessCleanupFailure {
-    pub(super) initial: io::Error,
-    pub(super) retry: io::Result<()>,
 }
 
 #[cfg(test)]

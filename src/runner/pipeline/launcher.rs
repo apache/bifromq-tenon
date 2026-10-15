@@ -42,7 +42,7 @@ use base64::engine::general_purpose::STANDARD;
 use tokio::process::{Child, ChildStdin, Command};
 
 use super::control::session::{RunnerPipelineControlSession, RunnerPipelineControlSessionError};
-use super::directory::{PipelineDirectoryCleanupError, cleanup_pipeline_directory};
+use super::directory::{PipelineCleanupError, cleanup_pipeline_directory};
 use super::launch_registry::{
     PipelineAttachmentError, PipelineLaunchRegistration, RunnerPipelineLaunchRegistry,
 };
@@ -159,6 +159,10 @@ impl RunnerPipelineLauncher {
             .mode(0o700)
             .create(&plugin_directory)
             .map_err(RunnerPipelineLaunchError::ControlDirectoryCreate)?;
+        let mut resources = PipelineLaunchResources {
+            control_directory: plugin_directory,
+            resource_group: None,
+        };
         let launch_id = STANDARD.encode(pending.launch_id());
         let mut command = Command::new(executable);
         command
@@ -170,7 +174,7 @@ impl RunnerPipelineLauncher {
             .stdin(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
-        let resource_group = match PipelineResourceGroup::prepare(
+        resources.resource_group = match PipelineResourceGroup::prepare(
             &self.resources,
             &mut command,
             target.document(),
@@ -178,18 +182,18 @@ impl RunnerPipelineLauncher {
         ) {
             Ok(group) => group,
             Err(error) => {
-                let failure = RunnerPipelineLaunchError::ResourceLimits(error.failure)
-                    .with_cleanup(error.cleanup.map_or(Ok(()), Err));
-                return Err(failure.with_cleanup(fs::remove_dir(&plugin_directory)));
+                resources.resource_group = error.group;
+                return Err(resources.finish_failed_start(
+                    RunnerPipelineLaunchError::ResourceLimits(error.failure),
+                ));
             }
         };
         let mut child = match spawn(&mut command, pending.launch_id()) {
             Ok(child) => child,
             Err(failure) => {
-                let failure = RunnerPipelineLaunchError::SpawnFailed(failure).with_cleanup(
-                    resource_group.map_or(Ok(()), PipelineResourceGroup::discard_empty),
+                return Err(
+                    resources.finish_failed_start(RunnerPipelineLaunchError::SpawnFailed(failure))
                 );
-                return Err(failure.with_cleanup(fs::remove_dir(&plugin_directory)));
             }
         };
         let startup_deadline = Deadline::start(config.pipeline_startup_timeout());
@@ -207,13 +211,12 @@ impl RunnerPipelineLauncher {
         let (registration, attached) = pending.into_parts();
         Ok(RunnerPipelineProcess {
             process_tree,
-            resource_group,
+            resources,
             lifetime_channel,
             registration,
             connection: PipelineConnection::Pending(attached),
             startup_deadline,
             published_revisions: PublishedPipelineRevisions::new(target),
-            control_directory: plugin_directory,
         })
     }
 }
@@ -245,7 +248,7 @@ impl fmt::Debug for RunnerPipelineLauncher {
 #[must_use = "dropping this owner force-terminates its Pipeline process group"]
 pub(in crate::runner) struct RunnerPipelineProcess {
     process_tree: PipelineProcessTree,
-    resource_group: Option<PipelineResourceGroup>,
+    resources: PipelineLaunchResources,
     #[allow(
         dead_code,
         reason = "ownership keeps the Pipeline parent-lifetime channel open"
@@ -255,8 +258,6 @@ pub(in crate::runner) struct RunnerPipelineProcess {
     connection: PipelineConnection,
     startup_deadline: Deadline,
     published_revisions: PublishedPipelineRevisions,
-    // This path owns the independently released directory created for this exact process.
-    control_directory: PathBuf,
 }
 
 impl RunnerPipelineProcess {
@@ -459,40 +460,35 @@ impl RunnerPipelineProcess {
         self.process_tree.terminate_and_reap(shutdown_timeout).await
     }
 
-    /// Releases this reaped process owner before deleting its control directory.
+    /// Releases resources after the process exits. The caller keeps this owner after an error.
     ///
-    /// The lifecycle calls this only after the attempt has completed process
-    /// cleanup successfully. Fatal failures instead retain the directory for
-    /// the Runner's global recovery decision.
+    /// The lifecycle calls this only after it has reaped the Pipeline process.
+    /// The owner keeps its resource group until group cleanup is completed.
     ///
     /// # Errors
     ///
-    /// Returns the task or filesystem failure if the directory cannot be removed.
+    /// Returns a resource-group, task, or filesystem error if cleanup is not completed.
     ///
     /// # Panics
     ///
-    /// Panics if the lifecycle violates the process reaping order.
+    /// Panics if the lifecycle calls this before it has reaped the Pipeline process.
     pub(in crate::runner) async fn cleanup_control_directory(
-        mut self,
-    ) -> Result<(), PipelineDirectoryCleanupError> {
+        &mut self,
+    ) -> Result<(), PipelineCleanupError> {
         assert!(
             self.process_tree.process_id().is_none(),
             "Pipeline control directory cleanup follows process-group reaping"
         );
-        self.cleanup_resource_group()
-            .await
-            .map_err(PipelineDirectoryCleanupError::ResourceGroup)?;
-        let path = self.control_directory.clone();
-        drop(self);
-        cleanup_pipeline_directory(path).await
+        self.resources.cleanup().await
     }
 
-    pub(in crate::runner) async fn cleanup_resource_group(&mut self) -> io::Result<()> {
-        if let Some(group) = &self.resource_group {
-            group.cleanup().await?;
-            self.resource_group.take();
+    pub(in crate::runner) async fn cleanup(&mut self) -> Result<(), PipelineCleanupError> {
+        if self.process_tree.process_id().is_some() {
+            self.force_kill_and_reap()
+                .await
+                .map_err(PipelineCleanupError::Process)?;
         }
-        Ok(())
+        self.cleanup_control_directory().await
     }
 
     async fn cleanup_failure(
@@ -532,6 +528,56 @@ impl RunnerPipelineProcess {
             Ok(_) => RunnerPipelineStartupError::Failed(failure),
             Err(cleanup) => RunnerPipelineStartupError::CleanupFailed { failure, cleanup },
         }
+    }
+}
+
+/// Owns launch resources until cleanup is completed.
+/// This includes resources from launch attempts that return an error.
+pub(in crate::runner) struct PipelineLaunchResources {
+    control_directory: PathBuf,
+    resource_group: Option<PipelineResourceGroup>,
+}
+
+impl PipelineLaunchResources {
+    pub(in crate::runner) async fn cleanup(&mut self) -> Result<(), PipelineCleanupError> {
+        if let Some(group) = &self.resource_group {
+            group
+                .cleanup()
+                .await
+                .map_err(PipelineCleanupError::ResourceGroup)?;
+            self.resource_group.take();
+        }
+        cleanup_pipeline_directory(self.control_directory.clone()).await
+    }
+
+    fn finish_failed_start(
+        mut self,
+        failure: RunnerPipelineLaunchError,
+    ) -> RunnerPipelineLaunchError {
+        let cleanup = (|| {
+            if let Some(group) = &self.resource_group {
+                group.discard_empty()?;
+                self.resource_group.take();
+            }
+            fs::remove_dir(&self.control_directory)
+        })();
+        match cleanup {
+            Ok(()) => failure,
+            Err(cleanup) => RunnerPipelineLaunchError::LaunchCleanupPending {
+                failure: Box::new(failure),
+                cleanup,
+                resources: Box::new(self),
+            },
+        }
+    }
+}
+
+impl fmt::Debug for PipelineLaunchResources {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PipelineLaunchResources")
+            .field("control_directory", &self.control_directory)
+            .finish_non_exhaustive()
     }
 }
 
@@ -638,12 +684,6 @@ pub(in crate::runner) enum RunnerPipelineStartupError {
     },
 }
 
-impl RunnerPipelineStartupError {
-    pub(in crate::runner) const fn requires_cleanup_retry(&self) -> bool {
-        matches!(self, Self::CleanupFailed { .. })
-    }
-}
-
 impl fmt::Display for RunnerPipelineStartupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -670,6 +710,12 @@ impl Error for RunnerPipelineStartupError {
 /// One Pipeline child could not reach an attached Runner control session.
 #[derive(Debug)]
 pub(in crate::runner) enum RunnerPipelineLaunchError {
+    /// A launch error keeps resources for the lifecycle to release.
+    LaunchCleanupPending {
+        failure: Box<Self>,
+        cleanup: io::Error,
+        resources: Box<PipelineLaunchResources>,
+    },
     /// Requested operating-system limits could not be established before exec.
     ResourceLimits(io::Error),
     /// The exact launch's private Plugin endpoint directory could not be created.
@@ -691,22 +737,6 @@ pub(in crate::runner) enum RunnerPipelineLaunchError {
         failure: Box<Self>,
         cleanup: io::Error,
     },
-}
-
-impl RunnerPipelineLaunchError {
-    pub(in crate::runner) const fn requires_cleanup_retry(&self) -> bool {
-        matches!(self, Self::CleanupFailed { .. })
-    }
-
-    fn with_cleanup(self, result: io::Result<()>) -> Self {
-        match result {
-            Ok(()) => self,
-            Err(cleanup) => Self::CleanupFailed {
-                failure: Box::new(self),
-                cleanup,
-            },
-        }
-    }
 }
 
 impl fmt::Display for RunnerPipelineLaunchError {
@@ -735,7 +765,10 @@ impl fmt::Display for RunnerPipelineLaunchError {
             Self::AttachmentTimedOut => {
                 formatter.write_str("Pipeline process attachment timed out")
             }
-            Self::CleanupFailed { failure, cleanup } => write!(
+            Self::CleanupFailed { failure, cleanup }
+            | Self::LaunchCleanupPending {
+                failure, cleanup, ..
+            } => write!(
                 formatter,
                 "Pipeline launch failed: {}; Pipeline process cleanup also failed: {}",
                 ErrorChain(failure.as_ref()),
@@ -754,7 +787,7 @@ impl Error for RunnerPipelineLaunchError {
             | Self::ProcessTreeOwnershipFailed(source)
             | Self::ProcessTreeWaitFailed(source) => Some(source),
             Self::AttachmentFailed(source) => Some(source),
-            Self::CleanupFailed { .. } => None,
+            Self::CleanupFailed { .. } | Self::LaunchCleanupPending { .. } => None,
             Self::ExitedBeforeAttachmentCompleted(_) | Self::AttachmentTimedOut => None,
         }
     }

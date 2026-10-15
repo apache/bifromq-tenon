@@ -295,19 +295,6 @@ impl PipelineShutdownError {
     pub(crate) const fn deadline_elapsed(&self) -> bool {
         matches!(self, Self::CleanupAfterDeadline(_))
     }
-
-    /// Returns whether the process owner still requires an explicit cleanup
-    /// attempt before it may be released.
-    #[must_use]
-    pub(crate) const fn requires_cleanup_retry(&self) -> bool {
-        matches!(
-            self,
-            Self::BeforeDeadline {
-                cleanup: Some(_),
-                ..
-            } | Self::CleanupAfterDeadline(_)
-        )
-    }
 }
 
 impl fmt::Display for PipelineShutdownError {

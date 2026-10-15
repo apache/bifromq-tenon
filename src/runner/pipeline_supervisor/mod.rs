@@ -255,7 +255,9 @@ impl PipelineSupervisor {
     fn request_shutdown(&mut self) {
         match mem::replace(&mut self.phase, PipelineSupervisorPhase::Draining) {
             PipelineSupervisorPhase::Running(context)
-            | PipelineSupervisorPhase::AdmissionClosed(context) => drop(context),
+            | PipelineSupervisorPhase::AdmissionClosed(context) => {
+                context.stop_cleanup_retries();
+            }
             PipelineSupervisorPhase::Draining => return,
         }
         for (_, slot) in self.lifecycles.drain() {
@@ -698,8 +700,8 @@ mod tests {
     use crate::payload_contract::PluginInterface;
     use crate::runner::control_server::test_support::pipeline_launcher;
     use crate::runner::management::PipelineLifecycleState;
+    use crate::runner::pipeline::PipelineCleanupError;
     use crate::runner::pipeline_supervisor::lifecycle::test_support::target;
-    use crate::runner::process_tree::PipelineShutdownError;
     use crate::runner::test_support::{install_plugin, load_config};
     use std::future::{poll_fn, ready};
     use std::task::Poll;
@@ -982,12 +984,8 @@ mod tests {
         for (document_id, outcome) in [
             (
                 failed.clone(),
-                Err(RunnerPipelineLifecycleError::Shutdown(
-                    PipelineShutdownError::BeforeDeadline {
-                        operation: "wait",
-                        primary: io::Error::other("injected wait failure"),
-                        cleanup: None,
-                    },
+                Err(RunnerPipelineLifecycleError::Cleanup(
+                    PipelineCleanupError::Process(io::Error::other("injected wait failure")),
                 )),
             ),
             (
