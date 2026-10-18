@@ -55,13 +55,13 @@ fn selected_target_does_not_wait_for_a_full_unselected_queue() -> io::Result<()>
     let wake = second.wait_interrupter();
     let control = Arc::new(FlowChannelControl::new());
     let worker_control = Arc::clone(&control);
-    let mut route = route(first, second)?;
+    let mut routes = routes(first, second)?;
     let id = PluginInstanceId::try_from("first").map_err(io::Error::other)?;
     let selected = id.clone();
-    let record = encoded_record(&[1])?;
+    let outputs = [output(encoded_record(&[1])?, Some(selected))?];
     let (done, result) = std::sync::mpsc::sync_channel(1);
     let writer = thread::spawn(move || {
-        let outcome = route.send(record, Some(selected), &ChannelMetrics::default(), || {
+        let outcome = send_batch(&mut routes, &outputs, &ChannelMetrics::default(), || {
             worker_control.is_stopping()
         });
         let _ = done.send(outcome);
@@ -75,13 +75,13 @@ fn selected_target_does_not_wait_for_a_full_unselected_queue() -> io::Result<()>
     let outcome = outcome
         .map_err(io::Error::other)?
         .map_err(io::Error::other)?;
-    let SendOutcome::Committed(receipts) = outcome else {
+    let BatchSendOutcome::Committed(pending) = outcome else {
         return Err(io::Error::other(
             "Selected target waited for the full queue",
         ));
     };
-    assert_eq!(receipts.len(), 1);
-    assert_eq!(receipts[0].0, id);
+    assert_eq!(pending.targets.len(), 1);
+    assert_eq!(pending.targets[0].1, id);
     assert!(matches!(
         first_reader.try_read().map_err(io::Error::other)?,
         ReadOutcome::Record(_)
@@ -115,10 +115,11 @@ fn a_full_last_target_prevents_any_partial_fanout_until_real_release() -> io::Re
         second_reader.try_read().map_err(io::Error::other)?,
         ReadOutcome::Record(_)
     ));
-    let mut route = route(first, second)?;
-    let record = encoded_record(&[1])?;
-    let writer =
-        thread::spawn(move || route.send(record, None, &ChannelMetrics::default(), || false));
+    let mut routes = routes(first, second)?;
+    let outputs = [output(encoded_record(&[1])?, None)?];
+    let writer = thread::spawn(move || {
+        send_batch(&mut routes, &outputs, &ChannelMetrics::default(), || false)
+    });
 
     let armed = wait_for_armed_loop(
         &second_path,
@@ -135,7 +136,7 @@ fn a_full_last_target_prevents_any_partial_fanout_until_real_release() -> io::Re
             .join()
             .map_err(|_| io::Error::other("Fanout writer panicked"))?
             .map_err(io::Error::other)?,
-        SendOutcome::Committed(_)
+        BatchSendOutcome::Committed(_)
     ));
     armed?;
     assert!(first_empty);
@@ -177,10 +178,10 @@ fn stop_interrupts_a_full_target_without_committing_to_any_target() -> io::Resul
     let wake = second.wait_interrupter();
     let control = Arc::new(FlowChannelControl::new());
     let worker_control = Arc::clone(&control);
-    let mut route = route(first, second)?;
-    let record = encoded_record(&[1])?;
+    let mut routes = routes(first, second)?;
+    let outputs = [output(encoded_record(&[1])?, None)?];
     let writer = thread::spawn(move || {
-        route.send(record, None, &ChannelMetrics::default(), || {
+        send_batch(&mut routes, &outputs, &ChannelMetrics::default(), || {
             worker_control.is_stopping()
         })
     });
@@ -197,7 +198,7 @@ fn stop_interrupts_a_full_target_without_committing_to_any_target() -> io::Resul
             .join()
             .map_err(|_| io::Error::other("Fanout writer panicked"))?
             .map_err(io::Error::other)?,
-        SendOutcome::Interrupted
+        BatchSendOutcome::Interrupted
     ));
     armed?;
     assert!(matches!(
@@ -261,6 +262,23 @@ fn route(first: QueueWriter, second: QueueWriter) -> io::Result<EgressRoute> {
     ))
 }
 
+fn routes(first: QueueWriter, second: QueueWriter) -> io::Result<EgressRoutes> {
+    let contract = SinkContractId::try_from("com.example.test@1.0.0").map_err(io::Error::other)?;
+    Ok(HashMap::from([(contract, route(first, second)?)]))
+}
+
+fn output(
+    record: EncodedEgressRecord,
+    instance_id: Option<PluginInstanceId>,
+) -> io::Result<EmitBoundary> {
+    Ok(EmitBoundary::Payload {
+        sink_contract_id: SinkContractId::try_from("com.example.test@1.0.0")
+            .map_err(io::Error::other)?,
+        instance_id,
+        record,
+    })
+}
+
 #[test]
 #[ignore = "run in release mode with CRITERION_HOME set and no concurrent builds"]
 fn direct_fanout_benchmark() -> io::Result<()> {
@@ -314,19 +332,16 @@ fn direct_fanout_benchmark() -> io::Result<()> {
                     // One thread releases real Queues immediately, isolating CPU
                     // cost from scheduling, downstream latency, and capacity waits.
                     let mut round_trip = || -> io::Result<()> {
-                        let route = routes
-                            .get_mut(&contract)
-                            .ok_or_else(|| io::Error::other("Benchmark route is bound"))?;
-                        let SendOutcome::Committed(committed) = route
-                            .send(
-                                encoded_record(black_box(&payload))?,
-                                selection.clone(),
-                                &metrics,
-                                || false,
-                            )
-                            .map_err(io::Error::other)?
+                        let outputs = [EmitBoundary::Payload {
+                            sink_contract_id: contract.clone(),
+                            instance_id: selection.clone(),
+                            record: encoded_record(black_box(&payload))?,
+                        }];
+                        let BatchSendOutcome::Committed(pending) =
+                            send_batch(&mut routes, &outputs, &metrics, || false)
+                                .map_err(io::Error::other)?
                         else {
-                            return Err(io::Error::other("Benchmark send was interrupted"));
+                            return Err(io::Error::other("Benchmark batch did not commit"));
                         };
                         let selected_count = if selection.is_some() { 1 } else { target_count };
                         for reader in readers.iter_mut().take(selected_count) {
@@ -340,13 +355,7 @@ fn direct_fanout_benchmark() -> io::Result<()> {
                             black_box(record.payload());
                             reader.release(1).map_err(io::Error::other)?;
                         }
-                        assert!(
-                            is_released(
-                                &routes,
-                                &PendingRelease::new(contract.clone(), committed, Vec::new()),
-                            )
-                            .map_err(io::Error::other)?
-                        );
+                        assert!(is_released(&routes, &pending).map_err(io::Error::other)?);
                         Ok(())
                     };
                     bencher.iter(|| {
@@ -438,74 +447,4 @@ fn batch_waits_for_all_records_in_a_queue_before_sending_anywhere() -> io::Resul
         ReadOutcome::Empty
     ));
     Ok(())
-}
-
-/// The normal result of one Egress fan-out attempt.
-pub(super) enum SendOutcome {
-    /// Every target committed the complete record at these release boundaries,
-    /// in target order.
-    Committed(Vec<(PluginInstanceId, WriteReceipt)>),
-    /// Planned stop interrupted the capacity wait; no target was committed.
-    Interrupted,
-}
-
-impl PendingRelease {
-    pub(super) fn new(
-        sink_contract_id: SinkContractId,
-        targets: Vec<(PluginInstanceId, WriteReceipt)>,
-        record_ids: Vec<u64>,
-    ) -> Self {
-        Self {
-            targets: targets
-                .into_iter()
-                .map(|(id, receipt)| (sink_contract_id.clone(), id, receipt))
-                .collect(),
-            record_ids,
-        }
-    }
-}
-
-impl EgressRoute {
-    #[allow(
-        clippy::expect_used,
-        reason = "Lua validates the target against this bound route generation"
-    )]
-    pub(super) fn send(
-        &mut self,
-        record: EncodedEgressRecord,
-        instance_id: Option<PluginInstanceId>,
-        metrics: &ChannelMetrics,
-        stopped: impl Fn() -> bool,
-    ) -> Result<SendOutcome, EgressError> {
-        let contract =
-            SinkContractId::try_from("com.example.test@1.0.0").expect("valid test contract");
-        let mut routes = HashMap::from([(
-            contract.clone(),
-            EgressRoute {
-                targets: std::mem::take(&mut self.targets),
-            },
-        )]);
-        let result = send_batch(
-            &mut routes,
-            &[EmitBoundary::Payload {
-                sink_contract_id: contract.clone(),
-                instance_id,
-                record,
-            }],
-            metrics,
-            stopped,
-        );
-        self.targets = routes.remove(&contract).expect("test route").targets;
-        result.map(|outcome| match outcome {
-            BatchSendOutcome::Committed(pending) => SendOutcome::Committed(
-                pending
-                    .targets
-                    .into_iter()
-                    .map(|(_, id, receipt)| (id, receipt))
-                    .collect(),
-            ),
-            BatchSendOutcome::Interrupted => SendOutcome::Interrupted,
-            BatchSendOutcome::TooLarge => unreachable!("test record must fit"),
-        })
-    }
 }

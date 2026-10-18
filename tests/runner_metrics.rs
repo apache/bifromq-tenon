@@ -180,13 +180,13 @@ fn real_core_snapshots_follow_configuration_and_actual_process_restarts() -> io:
     Ok(())
 }
 
-fn document() -> serde_json::Value {
+fn document() -> Value {
     json!({"specVersion":"1","id":"observed","pluginInstances":{"gateway":{"programName":"com.example.gateway","exactVersion":"1.0.0","config":{}}},"flows":{"loop":{"source":"gateway","process":{"script":"function main(event) emit() end"},"sinks":["gateway"]}}})
 }
 
 fn configure(root: &Path, address: SocketAddr) -> io::Result<PathBuf> {
     let config = write_config(root, address)?;
-    let mut settings: serde_json::Value = serde_json::from_slice(&fs::read(&config)?)?;
+    let mut settings: Value = serde_json::from_slice(&fs::read(&config)?)?;
     settings["metrics"] = json!({"nodeId":"test-node","collectionTimeoutMs":200});
     fs::write(&config, serde_json::to_vec(&settings)?)?;
     Ok(config)

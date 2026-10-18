@@ -48,10 +48,13 @@ fn real_pipeline_flow_metrics_survive_replacement_and_retire_with_the_flow() -> 
     original["flows"]["loop"]["process"]["script"] = json!(
         r#"
         local builder = registry:getBuilder("com.example.gateway@1.0.0")
+        local calls = 0
         function main(event)
+            calls = calls + 1
+            emit(builder:build())
             emit(builder:build())
             emit()
-            error("script failed after accepting output")
+            if calls == 2 then error("discard this call's outputs") end
         end
     "#
     );
@@ -81,16 +84,16 @@ fn real_pipeline_flow_metrics_survive_replacement_and_retire_with_the_flow() -> 
     assert_eq!(value(&blocked, "tenon.flow.egress.bytes"), Some(0.0));
     assert_eq!(
         phase_value(&blocked, "tenon.flow.errors", "lua_main"),
-        Some(2.0)
+        Some(1.0)
     );
     assert_eq!(
         phase_value(&blocked, "tenon.flow.errors", "decode"),
         Some(1.0)
     );
-    // Only the record the decoder rejected completed: the two accepted records
-    // keep their Source Completions until the Sink releases their output.
+    // The failed Lua call and invalid input complete with ERROR. The successful
+    // call waits until the Sink releases both of its output records.
     let withheld = points(&blocked, "tenon.flow.completion.records");
-    assert_eq!(withheld.iter().map(point_value).sum::<f64>(), 1.0);
+    assert_eq!(withheld.iter().map(point_value).sum::<f64>(), 2.0);
     assert!(
         withheld
             .iter()
@@ -115,6 +118,13 @@ fn real_pipeline_flow_metrics_survive_replacement_and_retire_with_the_flow() -> 
         completions
             .iter()
             .find(|point| attribute(&point["attributes"], "result") == Some("error"))
+            .map(point_value),
+        Some(2.0)
+    );
+    assert_eq!(
+        completions
+            .iter()
+            .find(|point| attribute(&point["attributes"], "result") == Some("ok"))
             .map(point_value),
         Some(1.0)
     );
@@ -148,6 +158,11 @@ fn real_pipeline_flow_metrics_survive_replacement_and_retire_with_the_flow() -> 
             && value(resource, "tenon.flow.input.records") == Some(6.0)
             && completions_sum(resource) == 6.0
     })?;
+    assert_eq!(value(&recreated, "tenon.flow.egress.records"), Some(4.0));
+    assert_eq!(
+        phase_value(&recreated, "tenon.flow.errors", "lua_main"),
+        Some(2.0)
+    );
     assert_eq!(histogram_count(&recreated, "tenon.flow.lua.duration"), 4);
     assert!(value(&recreated, "tenon.flow.lua.memory").is_some_and(|bytes| bytes > 0.0));
     runner.terminate()?;
