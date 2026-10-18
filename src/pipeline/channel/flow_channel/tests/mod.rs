@@ -316,7 +316,7 @@ fn channel_diagnostic(record: PipelineDiagnosticRecord) -> io::Result<ChannelDia
 }
 
 #[test]
-fn first_payload_boundary_alone_owns_the_current_ingress_completion() -> io::Result<()> {
+fn source_completion_waits_for_all_payloads_in_the_call() -> io::Result<()> {
     let mut source = SourceQueueFixture::new()?;
     let sink_directory = tempfile::tempdir()?;
     let kafka_id = sink_contract_id("com.example.kafka@1.0.0")?;
@@ -361,8 +361,7 @@ fn first_payload_boundary_alone_owns_the_current_ingress_completion() -> io::Res
         kafka.read_record()?.payload,
         expected_sink_payload("kafka")?
     );
-    // Only the first payload boundary owns the Source record, so the later
-    // boundaries of the same Lua call commit without waiting for its release.
+    // Both outputs are sent before either Sink releases its record.
     assert_eq!(
         iotdb.read_record()?.payload,
         expected_sink_payload("iotdb")?
@@ -370,16 +369,17 @@ fn first_payload_boundary_alone_owns_the_current_ingress_completion() -> io::Res
     assert!(source.try_completion()?.is_none());
 
     kafka.release(1)?;
+    assert!(source.try_completion()?.is_none());
+    iotdb.release(1)?;
     assert_eq!(
         source.wait_completion()?,
         completion(41, IngressCompletionStatus::Ok)
     );
-    iotdb.release(1)?;
     channel.stop()
 }
 
 #[test]
-fn completion_only_boundary_does_not_wait_for_a_later_payload_release() -> io::Result<()> {
+fn empty_emit_waits_for_payloads_in_the_same_call() -> io::Result<()> {
     let mut source = SourceQueueFixture::new()?;
     let sink_directory = tempfile::tempdir()?;
     let sink_contract_id = sink_contract_id("com.example.kafka@1.0.0")?;
@@ -401,23 +401,23 @@ fn completion_only_boundary_does_not_wait_for_a_later_payload_release() -> io::R
         SourceDelivery::AtLeastOnce,
         [&sink_contract_id],
     )?;
-    let processing = run_one_source(
+    let channel = RunningChannel::start(
         &source,
         spec,
         HashMap::from([(sink_contract_id, sink.route()?)]),
-    );
+    )?;
     source.submit(42, source_payload("device-42")?)?;
-
-    assert_eq!(
-        source.wait_completion()?,
-        completion(42, IngressCompletionStatus::Ok)
-    );
     assert_eq!(
         sink.read_record()?.payload,
         expected_sink_payload("later-output")?
     );
-    assert_eq!(processing.finish()?, FlowChannelStep::EventProcessed);
+    assert!(source.try_completion()?.is_none());
     sink.release(1)?;
+    assert_eq!(
+        source.wait_completion()?,
+        completion(42, IngressCompletionStatus::Ok)
+    );
+    channel.stop()?;
     Ok(())
 }
 
@@ -2319,63 +2319,6 @@ impl Drop for RunningChannel {
         if self.thread.is_some() {
             let _ = self.stop_and_join();
         }
-    }
-}
-
-struct RunningSourceStep {
-    result: Receiver<Result<FlowChannelStep, String>>,
-    thread: Option<thread::JoinHandle<()>>,
-}
-
-impl RunningSourceStep {
-    fn finish(mut self) -> io::Result<FlowChannelStep> {
-        let result = self
-            .result
-            .recv_timeout(WAIT_LIMIT)
-            .map_err(|_| io::Error::other("Flow Channel step did not finish"))?
-            .map_err(io::Error::other)?;
-        if let Some(thread) = self.thread.take() {
-            thread
-                .join()
-                .map_err(|_| io::Error::other("Flow Channel thread panicked"))?;
-        }
-        Ok(result)
-    }
-}
-
-fn run_one_source(
-    source: &SourceQueueFixture,
-    spec: FlowChannelSpec,
-    routes: PreparedEgressRoutes,
-) -> RunningSourceStep {
-    let submission_path = source.submission_path.clone();
-    let completion_path = source.completion_path.clone();
-    let bells = source.bells();
-    let (sender, result) = mpsc::sync_channel(1);
-    let thread = thread::spawn(move || {
-        let result = (|| -> Result<FlowChannelStep, String> {
-            let bells = bells.map_err(|error| error.to_string())?;
-            let (mut channel, _wake, _replacement) = open_channel(
-                FlowChannelQueuePaths::new(submission_path, completion_path),
-                bells,
-                Instant::now(),
-                spec,
-                test_channel_publisher(0),
-                routes,
-                Arc::new(FlowChannelControl::new()),
-                || false,
-            )
-            .map_err(|error| error.to_string())?;
-            channel
-                .process_available_source()
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| String::from("the committed Source record was not available"))
-        })();
-        let _ = sender.send(result);
-    });
-    RunningSourceStep {
-        result,
-        thread: Some(thread),
     }
 }
 

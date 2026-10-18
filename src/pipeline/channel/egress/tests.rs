@@ -363,3 +363,149 @@ fn direct_fanout_benchmark() -> io::Result<()> {
     criterion.final_summary();
     Ok(())
 }
+
+#[test]
+fn batch_waits_for_all_records_in_a_queue_before_sending_anywhere() -> io::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (first, mut first_reader) = queue(&directory.path().join("first"), 32)?;
+    let second_path = directory.path().join("second");
+    let (mut second, mut second_reader) = queue(&second_path, 32)?;
+    assert!(matches!(
+        second
+            .try_write_with(
+                8,
+                |destination| Write::write_all(destination, &[9; 8]),
+                || {}
+            )
+            .map_err(io::Error::other)?,
+        WriteOutcome::Committed(_)
+    ));
+    assert!(matches!(
+        second_reader.try_read().map_err(io::Error::other)?,
+        ReadOutcome::Record(_)
+    ));
+    let contract = SinkContractId::try_from("com.example.test@1.0.0").map_err(io::Error::other)?;
+    let outputs = ["first", "second", "second"]
+        .into_iter()
+        .map(|name| {
+            Ok(EmitBoundary::Payload {
+                sink_contract_id: contract.clone(),
+                instance_id: Some(PluginInstanceId::try_from(name).map_err(io::Error::other)?),
+                record: encoded_record(&[1])?,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let mut routes = HashMap::from([(contract, route(first, second)?)]);
+    let worker = thread::spawn(move || {
+        send_batch(&mut routes, &outputs, &ChannelMetrics::default(), || false)
+    });
+    let armed = wait_for_armed_loop(
+        &second_path,
+        &writer_bell_path(&second_path),
+        QueueWaiter::Writer,
+    );
+    let first_empty = matches!(
+        first_reader.try_read().map_err(io::Error::other)?,
+        ReadOutcome::Empty
+    );
+    let second_empty = matches!(
+        second_reader.try_read().map_err(io::Error::other)?,
+        ReadOutcome::Empty
+    );
+    second_reader.release(1).map_err(io::Error::other)?;
+    let outcome = worker
+        .join()
+        .map_err(|_| io::Error::other("batch writer panicked"))?
+        .map_err(io::Error::other)?;
+    armed?;
+    assert!(first_empty && second_empty);
+    let BatchSendOutcome::Committed(pending) = outcome else {
+        return Err(io::Error::other("batch did not commit"));
+    };
+    assert_eq!(pending.targets.len(), 2);
+    assert!(matches!(
+        first_reader.try_read().map_err(io::Error::other)?,
+        ReadOutcome::Record(_)
+    ));
+    for _ in 0..2 {
+        assert!(matches!(
+            second_reader.try_read().map_err(io::Error::other)?,
+            ReadOutcome::Record(_)
+        ));
+    }
+    assert!(matches!(
+        second_reader.try_read().map_err(io::Error::other)?,
+        ReadOutcome::Empty
+    ));
+    Ok(())
+}
+
+/// The normal result of one Egress fan-out attempt.
+pub(super) enum SendOutcome {
+    /// Every target committed the complete record at these release boundaries,
+    /// in target order.
+    Committed(Vec<(PluginInstanceId, WriteReceipt)>),
+    /// Planned stop interrupted the capacity wait; no target was committed.
+    Interrupted,
+}
+
+impl PendingRelease {
+    pub(super) fn new(
+        sink_contract_id: SinkContractId,
+        targets: Vec<(PluginInstanceId, WriteReceipt)>,
+        record_ids: Vec<u64>,
+    ) -> Self {
+        Self {
+            targets: targets
+                .into_iter()
+                .map(|(id, receipt)| (sink_contract_id.clone(), id, receipt))
+                .collect(),
+            record_ids,
+        }
+    }
+}
+
+impl EgressRoute {
+    #[allow(
+        clippy::expect_used,
+        reason = "Lua validates the target against this bound route generation"
+    )]
+    pub(super) fn send(
+        &mut self,
+        record: EncodedEgressRecord,
+        instance_id: Option<PluginInstanceId>,
+        metrics: &ChannelMetrics,
+        stopped: impl Fn() -> bool,
+    ) -> Result<SendOutcome, EgressError> {
+        let contract =
+            SinkContractId::try_from("com.example.test@1.0.0").expect("valid test contract");
+        let mut routes = HashMap::from([(
+            contract.clone(),
+            EgressRoute {
+                targets: std::mem::take(&mut self.targets),
+            },
+        )]);
+        let result = send_batch(
+            &mut routes,
+            &[EmitBoundary::Payload {
+                sink_contract_id: contract.clone(),
+                instance_id,
+                record,
+            }],
+            metrics,
+            stopped,
+        );
+        self.targets = routes.remove(&contract).expect("test route").targets;
+        result.map(|outcome| match outcome {
+            BatchSendOutcome::Committed(pending) => SendOutcome::Committed(
+                pending
+                    .targets
+                    .into_iter()
+                    .map(|(_, id, receipt)| (id, receipt))
+                    .collect(),
+            ),
+            BatchSendOutcome::Interrupted => SendOutcome::Interrupted,
+            BatchSendOutcome::TooLarge => unreachable!("test record must fit"),
+        })
+    }
+}

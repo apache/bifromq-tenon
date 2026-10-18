@@ -115,12 +115,12 @@ impl LuaMainOutcomeTestExt for LuaMainOutcome {
     }
 
     fn emit_boundaries(&self) -> &[EmitBoundary] {
-        &self.emit_boundaries
+        &self.emit_batch
     }
 
     fn into_result_without_emit_boundaries(self) -> Result<(), LuaVmError> {
         assert!(
-            self.emit_boundaries.is_empty(),
+            self.emit_batch.is_empty(),
             "Test did not expect accepted emit boundaries"
         );
         self.result
@@ -5466,5 +5466,40 @@ fn cancellation_inside_main_records_duration_once_and_terminal_reentry_records_n
             Some(1)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn buffered_emits_use_the_vm_memory_budget_and_release_it_on_drop() -> io::Result<()> {
+    let mut vm = load_vm(
+        "function main(event) for i = 1, 100 do emit() end end",
+        limits()?,
+    )
+    .map_err(test_error)?;
+    let before = vm.native_memory_budget.used_bytes();
+    let outcome = vm.call_timer(0);
+    assert!(outcome.result().is_ok());
+    assert!(vm.native_memory_budget.used_bytes() > before);
+    drop(outcome);
+    assert_eq!(vm.native_memory_budget.used_bytes(), before);
+    Ok(())
+}
+
+#[test]
+fn buffered_emits_cannot_escape_the_memory_limit_with_pcall() -> io::Result<()> {
+    let limits = ScriptVmLimits::try_new(non_zero(512 * 1024)?, TEST_CPU_TIME_LIMIT)
+        .map_err(io::Error::other)?;
+    let mut vm = load_vm(
+        "function main(event) pcall(function() for i = 1, 100000 do emit() end end) end",
+        limits,
+    )
+    .map_err(test_error)?;
+    let outcome = vm.call_timer(0);
+    assert_eq!(
+        outcome.result().err().map(LuaVmError::kind),
+        Some(LuaVmErrorKind::MemoryExceeded)
+    );
+    drop(outcome);
+    assert_eq!(vm.native_memory_budget.used_bytes(), 0);
     Ok(())
 }

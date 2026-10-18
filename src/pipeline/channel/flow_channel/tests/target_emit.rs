@@ -17,6 +17,7 @@
  * under the License.
  */
 
+use super::super::CompletionProgress;
 use super::*;
 
 const CONTRACT: &str = "com.example.kafka@1.0.0";
@@ -200,7 +201,7 @@ fn caught_target_error_does_not_publish_a_main_failure() -> io::Result<()> {
 }
 
 #[test]
-fn target_outputs_keep_first_boundary_ownership_and_completion_order() -> io::Result<()> {
+fn output_batches_complete_in_order_after_all_targets_release() -> io::Result<()> {
     let mut fixture = RoutingFixture::new()?;
     let (mut channel, _) = fixture.open(
         r#"
@@ -234,12 +235,13 @@ fn target_outputs_keep_first_boundary_ownership_and_completion_order() -> io::Re
         fixture.source.wait_completion()?,
         completion(1, IngressCompletionStatus::Ok)
     );
+    assert!(fixture.source.try_completion()?.is_none());
+    fixture.b.release(1)?;
+    channel.drain_released().map_err(channel_error)?;
     assert_eq!(
         fixture.source.wait_completion()?,
         completion(2, IngressCompletionStatus::Ok)
     );
-    fixture.b.release(1)?;
-    channel.drain_released().map_err(channel_error)?;
     Ok(())
 }
 
@@ -516,5 +518,249 @@ fn added_target_is_visible_only_after_cutover() -> io::Result<()> {
         completion(3, IngressCompletionStatus::Ok)
     );
     assert!(records.try_recv().is_err());
+    Ok(())
+}
+
+#[test]
+fn failed_call_discards_outputs_and_retries_earlier_inputs() -> io::Result<()> {
+    for failure in ["emit(builder:build(), 'missing')", "error('failed')"] {
+        let mut fixture = RoutingFixture::new()?;
+        let script = format!(
+            r#"
+            local builder = registry:getBuilder("com.example.kafka@1.0.0")
+            function main(event)
+                if event.payload.deviceId == "hold" then return end
+                emit()
+                emit(builder:build(), "A")
+                {failure}
+            end
+        "#
+        );
+        let (mut channel, _) = fixture.open(&script, test_channel_publisher(0))?;
+        fixture.source.submit(1, source_payload("hold")?)?;
+        assert_eq!(
+            process_one_source(&mut channel)?,
+            FlowChannelStep::EventProcessed
+        );
+        assert!(fixture.source.try_completion()?.is_none());
+        fixture.source.submit(2, source_payload("fail")?)?;
+        assert_eq!(
+            process_one_source(&mut channel)?,
+            FlowChannelStep::EventProcessed
+        );
+        assert_eq!(
+            fixture.source.wait_completion()?,
+            completion(1, IngressCompletionStatus::Retry)
+        );
+        assert_eq!(
+            fixture.source.wait_completion()?,
+            completion(2, IngressCompletionStatus::Error)
+        );
+        assert!(fixture.a.try_read_record()?.is_none());
+        assert!(fixture.b.try_read_record()?.is_none());
+        assert!(channel.pending_ack.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn repeated_and_broadcast_emits_keep_every_message() -> io::Result<()> {
+    let mut fixture = RoutingFixture::new()?;
+    let (mut channel, _) = fixture.open(
+        r#"
+        local builder = registry:getBuilder("com.example.kafka@1.0.0")
+        function main(event)
+            emit(builder:build(), "A")
+            assert(not pcall(emit, builder:build(), "missing"))
+            emit(builder:build())
+            emit(builder:build(), "A")
+            emit()
+        end
+    "#,
+        test_channel_publisher(0),
+    )?;
+    fixture.source.submit(1, source_payload("input")?)?;
+    assert_eq!(
+        process_one_source(&mut channel)?,
+        FlowChannelStep::EventProcessed
+    );
+    for _ in 0..3 {
+        assert!(fixture.a.try_read_record()?.is_some());
+    }
+    assert!(fixture.a.try_read_record()?.is_none());
+    assert!(fixture.b.try_read_record()?.is_some());
+    fixture.a.release(2)?;
+    fixture.b.release(1)?;
+    channel.drain_released().map_err(channel_error)?;
+    assert!(fixture.source.try_completion()?.is_none());
+    fixture.a.release(1)?;
+    channel.drain_released().map_err(channel_error)?;
+    assert_eq!(
+        fixture.source.wait_completion()?,
+        completion(1, IngressCompletionStatus::Ok)
+    );
+    Ok(())
+}
+
+#[test]
+fn oversized_batch_fails_before_any_output_and_rebuilds_vm() -> io::Result<()> {
+    let mut fixture = RoutingFixture::new()?;
+    let (diagnostics, mut records) = interested_channel(0);
+    let (mut channel, _) = fixture.open(
+        r#"
+        local builder = registry:getBuilder("com.example.kafka@1.0.0")
+        local fresh = true
+        function main(event)
+            assert(fresh)
+            fresh = false
+            if event.payload.deviceId == "large" then
+                emit(builder:build(), "A")
+                for i = 1, 100 do emit(builder:build(), "B") end
+            else emit() end
+        end
+    "#,
+        diagnostics,
+    )?;
+    fixture.source.submit(1, source_payload("large")?)?;
+    assert_eq!(
+        process_one_source(&mut channel)?,
+        FlowChannelStep::EventProcessed
+    );
+    assert_eq!(
+        fixture.source.wait_completion()?,
+        completion(1, IngressCompletionStatus::Error)
+    );
+    assert!(fixture.a.try_read_record()?.is_none());
+    assert!(fixture.b.try_read_record()?.is_none());
+    let error = channel_diagnostic(records.try_recv().map_err(io::Error::other)?)?;
+    assert_eq!(error.code, "process.lua_main_failed");
+    assert!(error.text.contains("egress.batch_too_large"));
+    fixture.source.submit(2, source_payload("small")?)?;
+    assert_eq!(
+        process_one_source(&mut channel)?,
+        FlowChannelStep::EventProcessed
+    );
+    assert_eq!(
+        fixture.source.wait_completion()?,
+        completion(2, IngressCompletionStatus::Ok)
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_timer_discards_its_outputs_and_retries_the_pending_group() -> io::Result<()> {
+    for failure in [
+        "error('timer failed')",
+        "for i = 1, 100 do emit(builder:build(), 'B') end",
+    ] {
+        let mut fixture = RoutingFixture::new()?;
+        let script = format!(
+            r#"
+            local builder = registry:getBuilder("com.example.kafka@1.0.0")
+            function main(event)
+                if event.type == "timer" then
+                    emit()
+                    emit(builder:build(), "A")
+                    {failure}
+                else setTimeout(0) end
+            end
+        "#
+        );
+        let (mut channel, _) = fixture.open(&script, test_channel_publisher(0))?;
+        for id in [1, 2] {
+            fixture.source.submit(id, source_payload("input")?)?;
+            assert_eq!(
+                process_one_source(&mut channel)?,
+                FlowChannelStep::EventProcessed
+            );
+        }
+        assert_eq!(
+            channel.process_timer().map_err(channel_error)?,
+            FlowChannelStep::EventProcessed
+        );
+        for id in [1, 2] {
+            assert_eq!(
+                fixture.source.wait_completion()?,
+                completion(id, IngressCompletionStatus::Retry)
+            );
+        }
+        assert!(fixture.a.try_read_record()?.is_none());
+        assert!(fixture.b.try_read_record()?.is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_emit_cannot_complete_a_later_input_before_an_older_batch() -> io::Result<()> {
+    let mut fixture = RoutingFixture::new()?;
+    let (mut channel, _) = fixture.open(
+        r#"
+        local builder = registry:getBuilder("com.example.kafka@1.0.0")
+        function main(event)
+            if event.payload.deviceId == "output" then emit(builder:build(), "A")
+            else emit() end
+        end
+    "#,
+        test_channel_publisher(0),
+    )?;
+    for (id, label) in [(1, "output"), (2, "filter")] {
+        fixture.source.submit(id, source_payload(label)?)?;
+        assert_eq!(
+            process_one_source(&mut channel)?,
+            FlowChannelStep::EventProcessed
+        );
+    }
+    assert!(fixture.source.try_completion()?.is_none());
+    assert!(fixture.a.try_read_record()?.is_some());
+    fixture.a.release(1)?;
+    channel.drain_released().map_err(channel_error)?;
+    for id in [1, 2] {
+        assert_eq!(
+            fixture.source.wait_completion()?,
+            completion(id, IngressCompletionStatus::Ok)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_failed_target_retries_the_whole_batch_after_another_target_succeeds() -> io::Result<()> {
+    let mut fixture = RoutingFixture::new()?;
+    let (mut channel, _) = fixture.open(
+        r#"
+        local builder = registry:getBuilder("com.example.kafka@1.0.0")
+        function main(event)
+            emit(builder:build(), "A")
+            emit(builder:build(), "B")
+        end
+    "#,
+        test_channel_publisher(0),
+    )?;
+    fixture.source.submit(1, source_payload("input")?)?;
+    assert_eq!(
+        process_one_source(&mut channel)?,
+        FlowChannelStep::EventProcessed
+    );
+    assert!(fixture.a.try_read_record()?.is_some());
+    assert!(fixture.b.try_read_record()?.is_some());
+    fixture.a.release(1)?;
+    channel.drain_released().map_err(channel_error)?;
+    assert!(fixture.source.try_completion()?.is_none());
+    let departed = PluginInstanceId::try_from("B").map_err(io::Error::other)?;
+    // Use the same departure registration as a route replacement.
+    let wake = ChannelWake::new(channel.bell.interrupter());
+    channel.egress_waits = wake.egress_registration();
+    wake.depart_egress_targets(&BTreeSet::from([departed]))
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        channel
+            .settle_pending_forward(SettlementInterruption::PlannedStop)
+            .map_err(channel_error)?,
+        CompletionProgress::Completed
+    );
+    assert_eq!(
+        fixture.source.wait_completion()?,
+        completion(1, IngressCompletionStatus::Retry)
+    );
     Ok(())
 }

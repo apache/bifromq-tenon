@@ -26,19 +26,14 @@
 //! remaining duration as that park's only timeout. No timer thread, callback,
 //! polling loop, or second Lua entry path exists.
 //!
-//! At-least-once record ids stay in one ordered `pending_records` vector until
-//! the first emit boundary accepted after them. That boundary takes the whole
-//! vector in one ownership move. Later boundaries from the same synchronous
-//! `main` call therefore own no Source records. That boundary and its records
-//! move into `pending_ack`, and its Completions are written only after the Sink
-//! released every target. The Channel itself does not wait for that release: it
-//! keeps reading Source records and emitting, so accepted output stays in flight
-//! up to the Source's own `maxPendingRecords` permits instead of one record at a
-//! time. `pending_ack` is settled oldest first, so an earlier boundary always
-//! completes before a later one and no later Sink can drag or bypass it. A
-//! completion-only boundary owns no EgressRecord and completes its records
-//! immediately. At-most-once writes `OK` immediately after the Ingress adapter
-//! has copied and released the Submission frame, before entering Lua.
+//! At-least-once Source records stay pending until a successful Lua call emits.
+//! All outputs from that call form one batch. Every destination Queue must have
+//! room for its part of the batch before any output is written. Source records
+//! complete only after all of those outputs are released. The Channel can
+//! process later events while releases are pending; batches settle in order.
+//! A call with only `emit()` completes without Sink output. A call with no emits
+//! leaves Source records pending. A failed call sends none of its outputs.
+//! At-most-once completes Source records before running Lua.
 //!
 //! A Source payload that cannot be decoded never enters Lua. Under
 //! at-least-once, if it is the only pending record, the channel reports `ERROR`
@@ -88,8 +83,9 @@ use super::queue_paths::{FlowChannelBells, FlowChannelQueuePaths};
 use super::wake::{ChannelWake, EgressWaitRegistration};
 
 use super::egress::{
-    EgressError, EgressHandoff, EgressRoutes, PendingRelease, PreparedEgressRoutes, SendOutcome,
-    bind_routes, emit_targets, is_released, settlement_metrics, target_departed,
+    BatchSendOutcome, EgressError, EgressHandoff, EgressRoutes, PendingRelease,
+    PreparedEgressRoutes, bind_routes, emit_targets, is_released, send_batch, settlement_metrics,
+    target_departed,
 };
 use crate::contracts::source::{IngressCompletionStatus, IngressRecord};
 use crate::lua::{EmitBoundary, EmitTargets, LuaMainOutcome, LuaVm, LuaVmErrorKind, TimerSchedule};
@@ -745,14 +741,14 @@ impl FlowChannel {
         outcome: LuaMainOutcome,
         failure_completion: LuaFailureCompletion,
     ) -> Result<FlowChannelStep, FlowChannelError> {
-        let (result, boundaries) = outcome.into_parts();
+        let (result, emit_batch) = outcome.into_parts();
         if let Err(error) = &result
             && error.kind() != LuaVmErrorKind::ExecutionStopped
         {
             let code = error.kind().tenon_document_issue_code();
             self.report_error(LUA_MAIN_PHASE, code, || error.diagnostic_detail());
         }
-        self.metrics.emits(&boundaries);
+        self.metrics.emits(&emit_batch);
         if self.is_stopping()
             && result
                 .as_ref()
@@ -760,23 +756,46 @@ impl FlowChannel {
         {
             return Ok(FlowChannelStep::Stopped);
         }
-        let mut claimed_records =
-            if self.spec.delivery() == SourceDelivery::AtLeastOnce && !boundaries.is_empty() {
-                std::mem::take(&mut self.pending_records)
-            } else {
-                Vec::new()
-            };
-
-        for boundary in boundaries {
-            // Only the first boundary of this call owns the pending Source
-            // records; every later boundary takes the now empty batch.
-            let records = std::mem::take(&mut claimed_records);
-            if self.deliver_boundary(boundary, records)? == FlowChannelStep::Stopped {
-                return Ok(FlowChannelStep::Stopped);
+        let mut failed = result.is_err();
+        if !failed && !emit_batch.is_empty() {
+            let has_payload = emit_batch
+                .iter()
+                .any(|boundary| matches!(boundary, EmitBoundary::Payload { .. }));
+            let sent = send_batch(&mut self.routes, &emit_batch, &self.metrics, || {
+                self.control.is_stopping()
+            })
+            .map_err(|source| FlowChannelError::EgressBatch { source })?;
+            match sent {
+                BatchSendOutcome::Interrupted => return Ok(FlowChannelStep::Stopped),
+                BatchSendOutcome::TooLarge => {
+                    self.report_error(LUA_MAIN_PHASE, "process.lua_main_failed", || {
+                        Cow::Borrowed(
+                            "egress.batch_too_large: outputs cannot fit in a destination Queue",
+                        )
+                    });
+                    failed = true;
+                }
+                BatchSendOutcome::Committed(mut pending) => {
+                    let records = if self.spec.delivery() == SourceDelivery::AtLeastOnce {
+                        std::mem::take(&mut self.pending_records)
+                    } else {
+                        Vec::new()
+                    };
+                    if has_payload || !self.pending_ack.is_empty() {
+                        pending.set_record_ids(records);
+                        self.pending_ack.push(pending);
+                    } else if self.complete_all(records, IngressCompletionStatus::Ok)?
+                        == CompletionProgress::Stopped
+                    {
+                        return Ok(FlowChannelStep::Stopped);
+                    }
+                }
             }
         }
+        // Free rejected output before rebuilding the VM.
+        drop(emit_batch);
 
-        if result.is_err() {
+        if failed {
             if self.spec.delivery() == SourceDelivery::AtLeastOnce
                 && !self.pending_records.is_empty()
             {
@@ -795,55 +814,6 @@ impl FlowChannel {
                 return Ok(FlowChannelStep::Stopped);
             }
         }
-        Ok(FlowChannelStep::EventProcessed)
-    }
-
-    /// Commits one Lua emit boundary and records the Source records it owns.
-    ///
-    /// A payload boundary that committed to every target is accepted without
-    /// waiting: its records complete later, once [`Self::drain_released`] or
-    /// [`Self::settle_pending_forward`] observes the Sink release. A
-    /// completion-only boundary produces no EgressRecord, so it completes its
-    /// records here.
-    #[allow(
-        clippy::expect_used,
-        reason = "Lua and routes use the same verified Contract registry"
-    )]
-    fn deliver_boundary(
-        &mut self,
-        boundary: EmitBoundary,
-        record_ids: Vec<u64>,
-    ) -> Result<FlowChannelStep, FlowChannelError> {
-        let EmitBoundary::Payload {
-            sink_contract_id,
-            instance_id,
-            record,
-        } = boundary
-        else {
-            if self.complete_all(record_ids, IngressCompletionStatus::Ok)?
-                == CompletionProgress::Stopped
-            {
-                return Ok(FlowChannelStep::Stopped);
-            }
-            return Ok(FlowChannelStep::EventProcessed);
-        };
-        let route = self
-            .routes
-            .get_mut(&sink_contract_id)
-            .expect("Lua emits only registered Sink Contracts from this Channel definition");
-        let sent = route
-            .send(record, instance_id, &self.metrics, || {
-                self.control.is_stopping()
-            })
-            .map_err(|source| FlowChannelError::EgressRoute {
-                sink_contract_id: sink_contract_id.clone(),
-                source,
-            })?;
-        let SendOutcome::Committed(targets) = sent else {
-            return Ok(FlowChannelStep::Stopped);
-        };
-        self.pending_ack
-            .push(PendingRelease::new(sink_contract_id, targets, record_ids));
         Ok(FlowChannelStep::EventProcessed)
     }
 

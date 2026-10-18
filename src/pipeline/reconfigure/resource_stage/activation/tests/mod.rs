@@ -328,7 +328,7 @@ async fn exit_after_ready_reports_backoff_without_changing_the_applied_etag() ->
 #[tokio::test(flavor = "current_thread")]
 async fn a_full_not_ready_sink_blocks_only_its_dependent_flow_until_release() -> TestResult {
     with_environment("normal", &[], async |reconfigurer, _, root, _| {
-        let pending = std::num::NonZeroU64::new(1).ok_or("Missing pending limit")?;
+        let pending = std::num::NonZeroU64::new(2).ok_or("Missing pending limit")?;
         let bytes = std::num::NonZeroU64::new(1024).ok_or("Missing record limit")?;
         let capacity = tenon_ipc::queue::capacity_for_record_limit(
             pending, tenon_ipc::queue::maximum_frame_len(bytes)?,
@@ -337,13 +337,13 @@ async fn a_full_not_ready_sink_blocks_only_its_dependent_flow_until_release() ->
             std::num::NonZeroU64::new(capacity.get() - tenon_ipc::queue::FRAME_HEADER_LEN as u64).ok_or("Queue limit is missing")?,
             crate::contracts::sink::encoded_len(0))?;
         let count = usize::try_from(capacity.get())? / frame;
-        assert_eq!(count * frame, usize::try_from(capacity.get())?);
+        assert!(usize::try_from(capacity.get())? - count * frame < frame);
         let target = additive_apply::next_revision(root, |document| {
             document["flows"]["dual-to-dual"]["maxPendingRecords"] = serde_json::json!(pending.get());
             document["flows"]["dual-to-dual"]["maxRecordBytes"] = serde_json::json!(bytes.get());
             document["pluginInstances"]["dual-b"]["config"]["behavior"] = serde_json::json!("delay-ready");
             document["flows"]["dual-to-dual"]["process"]["script"] = serde_json::json!(format!(
-                "local b = registry:getBuilder('com.example.dual@1.0.0'); local first = true; function main(event) if first then first = false; emit(); for i = 1, {count} do emit(b:build()) end else emit(b:build()) end end"));
+                "local b = registry:getBuilder('com.example.dual@1.0.0'); local first = true; function main(event) if first then first = false; for i = 1, {count} do emit(b:build()) end else emit(b:build()) end end"));
         })?;
         reconfigurer.apply(target, None).await?;
         wait_for_states(current(reconfigurer)?, &[("dual-b", PluginInstanceState::Starting)]).await?;
@@ -352,8 +352,7 @@ async fn a_full_not_ready_sink_blocks_only_its_dependent_flow_until_release() ->
         let mut sink = sink_reader(root, "dual-b", "dual-to-dual", 0)?;
         submit(&mut source, 40)?;
         for _ in 0..count { read_record(&mut sink).await?; }
-        assert_eq!(IngressCompletion::decode(read_record(&mut completion).await?.as_slice())?.record_id, 40);
-        completion.release(1)?;
+        assert!(matches!(completion.try_read()?, ReadOutcome::Empty));
         submit(&mut source, 41)?;
         let mut independent = source_writer(root, "input", "input-to-dual", 0)?;
         let mut independent_completion = source_completion(root, "input", "input-to-dual", 0)?;
@@ -364,6 +363,8 @@ async fn a_full_not_ready_sink_blocks_only_its_dependent_flow_until_release() ->
         sink.release(count)?;
         assert!(EgressRecord::decode(read_record(&mut sink).await?.as_slice())?.payload.is_empty());
         sink.release(1)?;
+        assert_eq!(IngressCompletion::decode(read_record(&mut completion).await?.as_slice())?.record_id, 40);
+        completion.release(1)?;
         let completed = IngressCompletion::decode(read_record(&mut completion).await?.as_slice())?;
         assert_eq!(completed.record_id, 41);
         assert_eq!(completed.status(), IngressCompletionStatus::Ok);

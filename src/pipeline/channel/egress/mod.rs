@@ -35,7 +35,7 @@ use std::sync::Arc;
 use super::metrics::{ChannelMetrics, TargetMetrics, WaitKind};
 use crate::contracts::sink::EncodedEgressRecord;
 use crate::identifiers::{PluginInstanceId, SinkContractId};
-use crate::lua::EmitTargets;
+use crate::lua::{EmitBoundary, EmitTargets};
 use tenon_ipc::bell::{BellRegion, LoopBell, WaitOutcome};
 use tenon_ipc::queue::QueueObserver;
 use tenon_ipc::queue::{QueueRuntimeError, QueueWriter, WriteOutcome, WriteReceipt};
@@ -59,43 +59,140 @@ pub(super) enum EgressHandoff {
     CurrentChannel(EgressRoutes),
 }
 
-/// The normal result of one Egress fan-out attempt.
-pub(super) enum SendOutcome {
-    /// Every target committed the complete record at these release boundaries,
-    /// in target order.
-    Committed(Vec<(PluginInstanceId, WriteReceipt)>),
-    /// Planned stop interrupted the capacity wait; no target was committed.
-    Interrupted,
-}
-
-/// One accepted Egress boundary whose Source Completions still wait for the Sink.
+/// One Lua output batch waiting for Sink results.
 ///
-/// The Channel keeps these in emit order and settles them from the front, so
-/// Source Completions keep record order. Egress only answers whether the Sink
-/// released the exact records this boundary committed.
+/// Each Queue contributes only its last receipt: releasing it also proves that
+/// its earlier records finished. Batches may span several Sink Contracts.
 pub(super) struct PendingRelease {
-    sink_contract_id: SinkContractId,
-    targets: Vec<(PluginInstanceId, WriteReceipt)>,
+    targets: Vec<(SinkContractId, PluginInstanceId, WriteReceipt)>,
     record_ids: Vec<u64>,
 }
 
 impl PendingRelease {
-    pub(super) fn new(
-        sink_contract_id: SinkContractId,
-        targets: Vec<(PluginInstanceId, WriteReceipt)>,
-        record_ids: Vec<u64>,
-    ) -> Self {
-        Self {
-            sink_contract_id,
-            targets,
-            record_ids,
-        }
+    pub(super) fn set_record_ids(&mut self, record_ids: Vec<u64>) {
+        self.record_ids = record_ids;
     }
 
-    /// Returns the Source records whose Completions this boundary owns.
+    /// Returns the Source records whose Completions this batch owns.
     pub(super) fn into_record_ids(self) -> Vec<u64> {
         self.record_ids
     }
+}
+
+/// Result of checking and sending one Lua call's outputs.
+pub(super) enum BatchSendOutcome {
+    Committed(PendingRelease),
+    TooLarge,
+    Interrupted,
+}
+
+/// Checks every Queue before writing any output. Repeated emits stay separate.
+#[allow(clippy::expect_used, reason = "Lua validates every output target")]
+pub(super) fn send_batch(
+    routes: &mut EgressRoutes,
+    boundaries: &[EmitBoundary],
+    metrics: &ChannelMetrics,
+    stopped: impl Fn() -> bool,
+) -> Result<BatchSendOutcome, EgressError> {
+    let mut targets: BTreeMap<PluginInstanceId, SinkContractId> = BTreeMap::new();
+    for boundary in boundaries {
+        if let EmitBoundary::Payload {
+            sink_contract_id,
+            instance_id,
+            ..
+        } = boundary
+        {
+            let route = routes.get(sink_contract_id).expect("validated contract");
+            for instance in route
+                .targets
+                .keys()
+                .filter(|id| instance_id.as_ref().is_none_or(|selected| selected == *id))
+            {
+                targets
+                    .entry(instance.clone())
+                    .or_insert_with(|| sink_contract_id.clone());
+            }
+        }
+    }
+    let mut spaces = Vec::with_capacity(targets.len());
+    // Reject impossible batches before waiting on any Queue.
+    for (instance, contract) in targets {
+        let target = &routes[&contract].targets[&instance];
+        // Read lengths directly from the output buffer instead of copying one
+        // length per output per target for broadcasts.
+        let lengths = boundaries.iter().filter_map(|boundary| match boundary {
+            EmitBoundary::Payload {
+                sink_contract_id,
+                instance_id,
+                record,
+            } if sink_contract_id == &contract
+                && instance_id.as_ref().is_none_or(|id| id == &instance) =>
+            {
+                Some(record.len())
+            }
+            _ => None,
+        });
+        let Some(space) = target.writer.batch_space(lengths)? else {
+            return Ok(BatchSendOutcome::TooLarge);
+        };
+        spaces.push((contract, instance, space));
+    }
+    for (contract, instance, space) in spaces {
+        let target = routes
+            .get_mut(&contract)
+            .expect("validated contract")
+            .targets
+            .get_mut(&instance)
+            .expect("validated target");
+        let mut wait = metrics.wait(WaitKind::EgressCapacity(&target.metrics));
+        loop {
+            if stopped() {
+                return Ok(BatchSendOutcome::Interrupted);
+            }
+            if target
+                .writer
+                .wait_batch_writable_observed(space, || wait.blocked())?
+                == WaitOutcome::Ready
+            {
+                wait.ready();
+                break;
+            }
+        }
+    }
+    if stopped() {
+        return Ok(BatchSendOutcome::Interrupted);
+    }
+    let mut receipts = BTreeMap::new();
+    for boundary in boundaries {
+        if let EmitBoundary::Payload {
+            sink_contract_id,
+            instance_id,
+            record,
+        } = boundary
+        {
+            let route = routes
+                .get_mut(sink_contract_id)
+                .expect("validated contract");
+            for (instance, target) in &mut route.targets {
+                if instance_id
+                    .as_ref()
+                    .is_none_or(|selected| selected == instance)
+                {
+                    receipts.insert(
+                        instance.clone(),
+                        (sink_contract_id.clone(), target.commit(record, metrics)?),
+                    );
+                }
+            }
+        }
+    }
+    Ok(BatchSendOutcome::Committed(PendingRelease {
+        targets: receipts
+            .into_iter()
+            .map(|(instance, (contract, receipt))| (contract, instance, receipt))
+            .collect(),
+        record_ids: Vec::new(),
+    }))
 }
 
 #[derive(Debug)]
@@ -124,45 +221,6 @@ impl EgressRoute {
                 })
                 .collect(),
         }
-    }
-
-    #[allow(
-        clippy::expect_used,
-        reason = "Lua validates the target against this bound route generation"
-    )]
-    pub(super) fn send(
-        &mut self,
-        record: EncodedEgressRecord,
-        instance_id: Option<PluginInstanceId>,
-        metrics: &ChannelMetrics,
-        stopped: impl Fn() -> bool,
-    ) -> Result<SendOutcome, EgressError> {
-        if let Some(instance_id) = instance_id {
-            let target = self
-                .targets
-                .get_mut(&instance_id)
-                .expect("an accepted target belongs to this bound route");
-            if target.wait_writable(record.len(), metrics, &stopped)? == WaitOutcome::Interrupted
-                || stopped()
-            {
-                return Ok(SendOutcome::Interrupted);
-            }
-            let receipt = target.commit(&record, metrics)?;
-            return Ok(SendOutcome::Committed(vec![(instance_id, receipt)]));
-        }
-        for target in self.targets.values_mut() {
-            if target.wait_writable(record.len(), metrics, &stopped)? == WaitOutcome::Interrupted {
-                return Ok(SendOutcome::Interrupted);
-            }
-        }
-        if stopped() {
-            return Ok(SendOutcome::Interrupted);
-        }
-        let mut receipts = Vec::with_capacity(self.targets.len());
-        for (instance, target) in &mut self.targets {
-            receipts.push((instance.clone(), target.commit(&record, metrics)?));
-        }
-        Ok(SendOutcome::Committed(receipts))
     }
 
     pub(super) fn observations(&self) -> impl Iterator<Item = (&TargetMetrics, QueueObserver)> {
@@ -226,29 +284,6 @@ struct EgressTarget {
 }
 
 impl EgressTarget {
-    fn wait_writable(
-        &mut self,
-        record_len: usize,
-        metrics: &ChannelMetrics,
-        stopped: impl Fn() -> bool,
-    ) -> Result<WaitOutcome, EgressError> {
-        let mut wait = metrics.wait(WaitKind::EgressCapacity(&self.metrics));
-        loop {
-            if stopped() {
-                return Ok(WaitOutcome::Interrupted);
-            }
-            if self
-                .writer
-                .wait_writable_observed(record_len, || wait.blocked())
-                .map_err(EgressError)?
-                == WaitOutcome::Ready
-            {
-                wait.ready();
-                return Ok(WaitOutcome::Ready);
-            }
-        }
-    }
-
     fn commit(
         &mut self,
         record: &EncodedEgressRecord,
@@ -300,14 +335,13 @@ pub(super) fn is_released(
     routes: &EgressRoutes,
     pending: &PendingRelease,
 ) -> Result<bool, QueueRuntimeError> {
-    let route = routes
-        .get(&pending.sink_contract_id)
-        .expect("an accepted boundary keeps its route until the Channel settles it");
-    for (instance, receipt) in &pending.targets {
-        let target = route
+    for (contract, instance, receipt) in &pending.targets {
+        let target = &routes
+            .get(contract)
+            .expect("a pending batch keeps its route")
             .targets
             .get(instance)
-            .expect("an accepted boundary keeps its targets until the Channel settles it");
+            .expect("a pending batch keeps its targets");
         if !target.writer.is_released(receipt)? {
             return Ok(false);
         }
@@ -327,7 +361,7 @@ pub(super) fn target_departed(
     pending
         .targets
         .iter()
-        .any(|(instance, _)| departed(instance))
+        .any(|(_, instance, _)| departed(instance))
 }
 
 /// Returns the target metrics one settlement wait is attributed to.
@@ -343,12 +377,12 @@ pub(super) fn settlement_metrics<'a>(
     routes: &'a EgressRoutes,
     pending: &PendingRelease,
 ) -> &'a TargetMetrics {
-    let (instance, _) = pending
+    let (contract, instance, _) = pending
         .targets
         .first()
         .expect("an accepted boundary has at least one target");
     &routes
-        .get(&pending.sink_contract_id)
+        .get(contract)
         .expect("an accepted boundary keeps its route until the Channel settles it")
         .targets
         .get(instance)

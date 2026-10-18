@@ -23,10 +23,11 @@
 //! `emit` validates one immutable [`BuiltPayload`] and encodes its dynamic
 //! Protobuf message with a stable field and map-key order. A no-argument `emit`
 //! appends a completion-only boundary. Both forms append their accepted output
-//! immediately, so a later script failure preserves the accepted prefix. This
-//! module checks complete `EgressRecord` size before encoding, but does not write mmap
-//! data, or resolve Ingress Completion.
+//! to a buffer. FlowChannel sends that buffer only if the call succeeds.
+//! This module checks record size and charges buffered output to the VM memory
+//! limit. It does not write Queues or complete Source records.
 
+use super::memory::LuaNativeMemoryBudget;
 use super::payload::BuiltPayload;
 use super::{
     ExecutionBudget, LuaApiFailure, LuaApiResult, LuaVmFatalFault,
@@ -61,23 +62,54 @@ pub(crate) enum EmitBoundary {
     CompletionOnly,
 }
 
+/// Buffered output and its charge against the VM memory limit.
+#[derive(Debug, Default)]
+pub(crate) struct EmitBatch {
+    boundaries: Vec<EmitBoundary>,
+    budget: Option<Rc<LuaNativeMemoryBudget>>,
+    charged: usize,
+}
+
+impl std::ops::Deref for EmitBatch {
+    type Target = Vec<EmitBoundary>;
+    fn deref(&self) -> &Self::Target {
+        &self.boundaries
+    }
+}
+
+impl Drop for EmitBatch {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.budget {
+            budget.release(self.charged);
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 enum EmitState {
     #[default]
     Inactive,
     Active {
         targets: Rc<EmitTargets>,
-        boundaries: Vec<EmitBoundary>,
+        boundaries: EmitBatch,
     },
 }
 
 /// Per-VM call slot shared by the Lua callback and its Rust event-loop owner.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(super) struct EmitSlot {
     state: Rc<RefCell<EmitState>>,
+    budget: Rc<LuaNativeMemoryBudget>,
 }
 
 impl EmitSlot {
+    pub(super) fn new(budget: Rc<LuaNativeMemoryBudget>) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(EmitState::Inactive)),
+            budget,
+        }
+    }
+
     pub(super) fn begin_main(&self, targets: Rc<EmitTargets>) -> LuaApiResult<()> {
         let mut state = self
             .state
@@ -88,12 +120,16 @@ impl EmitSlot {
         }
         *state = EmitState::Active {
             targets,
-            boundaries: Vec::new(),
+            boundaries: EmitBatch {
+                budget: Some(Rc::clone(&self.budget)),
+                boundaries: Vec::new(),
+                charged: 0,
+            },
         };
         Ok(())
     }
 
-    pub(super) fn finish_main(&self) -> LuaApiResult<Vec<EmitBoundary>> {
+    pub(super) fn finish_main(&self) -> LuaApiResult<EmitBatch> {
         let mut state = self
             .state
             .try_borrow_mut()
@@ -111,7 +147,11 @@ impl EmitSlot {
             .map_err(|_| LuaApiFailure::InternalInvariantViolation)
     }
 
-    fn accept(&self, boundary: EmitBoundary) -> LuaApiResult<()> {
+    fn accept(
+        &self,
+        bytes: usize,
+        build: impl FnOnce() -> LuaApiResult<EmitBoundary>,
+    ) -> LuaApiResult<()> {
         let mut state = self
             .state
             .try_borrow_mut()
@@ -119,10 +159,26 @@ impl EmitSlot {
         let EmitState::Active { boundaries, .. } = &mut *state else {
             return Err(LuaApiFailure::InternalInvariantViolation);
         };
+        // Charge before encoding. Include spare Vec space and cloned identifiers.
+        let charge = bytes
+            .checked_add(4 * size_of::<EmitBoundary>())
+            .ok_or(LuaApiFailure::MemoryExceeded)?;
+        let next = boundaries
+            .charged
+            .checked_add(charge)
+            .ok_or(LuaApiFailure::MemoryExceeded)?;
+        let budget = boundaries
+            .budget
+            .as_ref()
+            .ok_or(LuaApiFailure::InternalInvariantViolation)?;
+        budget.replace(boundaries.charged, next)?;
+        boundaries.charged = next;
+        let boundary = build()?;
         boundaries
+            .boundaries
             .try_reserve(1)
             .map_err(|_| LuaApiFailure::ResourceLimitExceeded)?;
-        boundaries.push(boundary);
+        boundaries.boundaries.push(boundary);
         Ok(())
     }
 
@@ -192,7 +248,7 @@ fn accept_emit(
     max_record_bytes: NonZeroU64,
 ) -> LuaApiResult<()> {
     if arguments.is_empty() {
-        return slot.accept(EmitBoundary::CompletionOnly);
+        return slot.accept(0, || Ok(EmitBoundary::CompletionOnly));
     }
     if arguments.len() > 2 {
         return Err(LuaApiFailure::Api(EMIT_ARGUMENTS_ERROR));
@@ -210,12 +266,21 @@ fn accept_emit(
         .pop_front()
         .map(|value| slot.resolve_target(value, payload.sink_contract_id()))
         .transpose()?;
-    let boundary = EmitBoundary::Payload {
-        sink_contract_id: payload.sink_contract_id().clone(),
-        instance_id,
-        record: encode_deterministically(payload.message(), max_record_bytes)?,
-    };
-    slot.accept(boundary)
+    let encoded_len = sink::encoded_len(payload.message().encoded_len());
+    if encoded_len as u64 > max_record_bytes.get() {
+        return Err(LuaApiFailure::Api("egress.record_too_large"));
+    }
+    let charge = encoded_len
+        .checked_add(payload.sink_contract_id().to_string().len())
+        .and_then(|bytes| bytes.checked_add(instance_id.as_ref().map_or(0, |id| id.as_str().len())))
+        .ok_or(LuaApiFailure::MemoryExceeded)?;
+    slot.accept(charge, || {
+        Ok(EmitBoundary::Payload {
+            sink_contract_id: payload.sink_contract_id().clone(),
+            instance_id,
+            record: encode_deterministically(payload.message(), max_record_bytes)?,
+        })
+    })
 }
 
 fn encode_deterministically(

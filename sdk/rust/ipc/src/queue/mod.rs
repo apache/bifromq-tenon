@@ -514,6 +514,8 @@ pub fn plan_append(
     validate_positions(capacity, commit, release)?;
     let frame_len = record_frame_len(capacity, max_payload_size, record_len)?;
     let frame_len_u64 = u64::try_from(frame_len).map_err(|_| FormatError::RecordTooLarge)?;
+    // Positions keep increasing across laps. Subtract bytes already freed by
+    // the reader to find the bytes still in use; commit alone is not occupancy.
     let used = commit
         .get()
         .checked_sub(release.get())

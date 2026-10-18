@@ -115,7 +115,7 @@ fn input_decode_main_and_completion_metrics_follow_actual_work() -> io::Result<(
 }
 
 #[test]
-fn accepted_emits_and_script_error_are_visible_before_the_sink_releases() -> io::Result<()> {
+fn failed_calls_count_emits_and_errors_but_send_no_output() -> io::Result<()> {
     let captured = Capture::new();
     let metrics = FlowMetrics::new(&captured.meter());
     let flow = metrics.flow("flow");
@@ -154,8 +154,12 @@ fn accepted_emits_and_script_error_are_visible_before_the_sink_releases() -> io:
         flow.channel(0),
     )?;
     source.submit(1, source_payload("device")?)?;
-    let output = first.read_record()?;
-    assert_eq!(second.read_record()?, output);
+    assert_eq!(
+        source.wait_completion()?,
+        completion(1, IngressCompletionStatus::Error)
+    );
+    assert!(first.try_read_record()?.is_none());
+    assert!(second.try_read_record()?.is_none());
     let waiting = wait_number(&captured, "tenon.flow.emits", &[("kind", "payload")], 1.0)?;
     assert_eq!(
         waiting.number("tenon.flow.emits", &[("kind", "payload")]),
@@ -177,27 +181,15 @@ fn accepted_emits_and_script_error_are_visible_before_the_sink_releases() -> io:
     );
     for target in ["first", "second"] {
         assert_eq!(
-            waiting.number(
-                "tenon.flow.egress.records",
-                &[("tenon.plugin.instance.id", target)]
-            ),
-            Some(1.0)
-        );
-        assert_eq!(
-            waiting.number(
-                "tenon.flow.egress.bytes",
-                &[("tenon.plugin.instance.id", target)]
-            ),
-            Some(output.payload.len() as f64)
+            waiting
+                .number(
+                    "tenon.flow.egress.records",
+                    &[("tenon.plugin.instance.id", target)]
+                )
+                .unwrap_or(0.0),
+            0.0
         );
     }
-    assert_eq!(source.try_completion()?, None);
-    first.release(1)?;
-    second.release(1)?;
-    assert_eq!(
-        source.wait_completion()?,
-        completion(1, IngressCompletionStatus::Ok)
-    );
     // The Channel settles accepted output without ever blocking on the Sink, so
     // an unreleased record never becomes a modelled wait. The only wait a
     // settled Channel enters is its own doorbell park, which reports `idle`.

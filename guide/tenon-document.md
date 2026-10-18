@@ -58,11 +58,13 @@ To run, a Document also needs the exact plugin versions installed, compatible pl
 
 With `at-most-once`, Source receives `OK` when the Pipeline has read the complete input record, before Lua processing or Sink delivery. Later failures do not change that result.
 
-With `at-least-once`, Source records remain pending in input order until an `emit` completes them. The first successful `emit` in a `main` call takes all records pending at that point.
+With `at-least-once`, Source records stay pending until a successful `main` call emits. All outputs from that call form one batch. That batch owns all pending Source records, including the current input for a Source event.
 
-A payload emit sends to every matching Sink instance in the Flow, unless `emit(payload, instanceId)` selects one instance. Tenon waits for all selected targets to report completion before it completes that group. Target validation follows the [Lua contract](lua.md#builders-and-output). A zero-argument `emit()` produces no Sink record and completes the group without waiting for a Sink. Returning without any accepted emit leaves records pending for a later completion boundary.
+A payload emit sends to every matching Sink instance in the Flow, unless `emit(payload, instanceId)` selects one instance. Repeated emits remain separate messages. Tenon waits for enough space for the whole batch in every destination Queue before writing any output. A batch that cannot fit, even after older records are released, fails with `egress.batch_too_large`. Queue space includes frame headers, alignment, and gaps at the end of the circular buffer.
 
-Later emits in the same call produce additional outputs without changing that Source group's completion. Multiple emits are not a transaction; a later error cannot roll back an earlier successful boundary. Each Sink plugin defines when it reports successful delivery. Source `RETRY` requires the Source implementation to decide replay; it does not create a durable Runner retry log. Plugin authors should handle completion results as described by their [language SDK](plugins.md#sdks-and-generators).
+Source records receive `OK` only after every output in their batch finishes at all selected targets. The Channel can process later events while it waits for these results. Batches complete in order. A call with only `emit()` completes without Sink output; an `emit()` mixed with payload emits cannot complete the inputs early. Returning without any emit leaves inputs pending for a later call or timer.
+
+An uncaught Lua error discards all outputs from that call. A batch that cannot fit also follows the Lua failure and VM recovery rules. These checks happen before sending, but writes across Queues are not atomic: a crash can still leave some outputs delivered and others missing. Replay may duplicate outputs that already succeeded. Each Sink plugin defines when delivery succeeds. Source `RETRY` asks the Source to decide replay; it does not create a durable Runner retry log. See the [Lua contract](lua.md) and [plugin SDKs](plugins.md#sdks-and-generators).
 
 ## Updates and failure
 

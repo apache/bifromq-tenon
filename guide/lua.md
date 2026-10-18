@@ -38,7 +38,7 @@ Conceptually, one event is processed as `(state, event) → (next state, effects
 
 Pure filtering and mapping fit this model without keeping application state between events. Stateful scripts can accumulate records, debounce input, or change behavior as events arrive. State and timers are volatile and are recreated when the VM resets. Tenon does not persist Lua execution progress or provide durable Lua state or timers.
 
-Each accepted effect follows its own completion rules. Returning from `main` does not establish a transaction across state changes and outputs; accepted outputs survive a later script failure. See [failed inputs and execution](#failed-inputs-and-execution) and [delivery completion](tenon-document.md#completion-and-delivery).
+All outputs from one `main` call form one batch. An uncaught error discards that call's outputs and rebuilds the VM. Once sending starts, downstream effects cannot be rolled back. See [failed inputs and execution](#failed-inputs-and-execution) and [delivery completion](tenon-document.md#completion-and-delivery).
 
 ## Script lifecycle
 
@@ -118,9 +118,13 @@ An invalid target raises an ordinary Lua error before Tenon accepts any output f
 
 Source and timer calls use the current Flow bindings. A binding update changes the targets for later calls. A declared target remains valid while its process is not ready. The channel waits for capacity on the selected Queue. It does not send to another instance as a fallback. Without `instanceId`, the channel waits for every matching Queue before it writes any output.
 
-Output is allowed only during `main` or its helpers, not at top level. One invocation may emit zero or more times. Tenon accepts each successful emit in order. A record-size error occurs before acceptance with `egress.record_too_large`. A later error does not withdraw earlier accepted outputs.
+Output is allowed only during `main` or its helpers, not at top level. Each Source event and each timer event runs a separate `main` call. All emits in that call form one batch. Repeated emits to the same instance remain separate messages, including when a broadcast and a targeted emit both select it.
 
-With at-least-once delivery, the first successful emit takes the pending Source group. A payload boundary completes that group after all of its selected targets report success. A zero-argument emit completes the group without Sink output. Later emits produce separate outputs and do not change the first group's completion conditions. Earlier outstanding output can still delay completion of a later group. See [delivery semantics](tenon-document.md#completion-and-delivery) and the [SDK contract](../sdk/plugin-sdk-contract.md) for terminal outcomes.
+Tenon buffers outputs until `main` returns normally. An uncaught error discards all of that call's outputs. An error caught by `pcall` does not fail the call. A record-size error is catchable and reports `egress.record_too_large`. Buffered records and their bookkeeping count against the VM memory limit.
+
+Before sending, Tenon checks space for the complete batch in each destination Queue. This includes frame headers, alignment, and wrap gaps. It waits for older records to release space. If the batch cannot fit even in an empty Queue at its current write position, it fails with `egress.batch_too_large` through the Lua failure path. This check happens after `main` returns, so `pcall` cannot catch it.
+
+With at-least-once delivery, the batch owns all pending Source records. They receive `OK` only after every payload output finishes at every selected target. Later events can run while results are pending; batches complete in order. A call with only `emit()` completes without Sink output. Mixing `emit()` with payload emits still waits for all payload outputs. A call with no emits leaves inputs pending. See [delivery semantics](tenon-document.md#completion-and-delivery) and the [SDK contract](../sdk/plugin-sdk-contract.md).
 
 Registry lookup, Builder receiver/argument/type/range errors and timer argument errors are ordinary Lua errors catchable with `pcall`. Resource-limit failures and sandbox violations are not recoverable inside the invalidated VM.
 
@@ -145,7 +149,7 @@ Omitting `id` or passing `nil` selects the anonymous timer. Invalid ids raise th
 
 `event.eligibleAt` is the timer's deadline in integer milliseconds since Pipeline startup, on the same monotonic timeline as `event.timestamp`. The difference `event.timestamp - event.eligibleAt` is its dispatch delay. Timers with the same deadline run in registration order. Among due timers and readable Source input, the earlier deadline or first observed Source readiness runs first; ties use their registration or observation order. Source readiness keeps its place until one record is consumed, so a timer that repeatedly reschedules itself with zero delay cannot indefinitely prevent readable Source input from running. Sink backpressure and lifecycle work can still delay either kind of event.
 
-Named timers share the VM's batch completion behavior: the first successful `emit` in an event can complete all pending Source records in that VM. A timer id does not provide independent reliable completion for records with that key.
+Named timers share the VM's pending Source records: a successful timer call that emits creates a batch for all of them. A timer id does not provide independent reliable completion for records with that key.
 
 Lua state, Builders, snapshots and timers count toward the VM's memory allowance. Each pending timer is charged 2 KiB plus three times its id length in UTF-8 bytes (zero id bytes for the anonymous timer). The fixed charge includes an allowance for the timer and its indexes; it is an estimate, not an exact allocation or process-memory measurement. There is no separate timer-count limit. Top-level initialization and each `main` invocation are bounded by the Runner's Lua CPU limit. State lives only in the current VM. A script/resource/sandbox failure invalidates the VM and its timers; rebuilding executes top-level code again. Relevant Document updates and process restarts also recreate state. Script replacement can briefly hold both old and new VMs, each with its own configured allowance.
 
@@ -225,6 +229,6 @@ Use Lua's `&`, `|`, `~`, `<<` and `>>` on integer read results for bit fields. `
 
 ## Failed inputs and execution
 
-For at-least-once delivery, a Source decode failure completes the current record with `ERROR`. If earlier records are pending, they receive `RETRY` and the VM is rebuilt; otherwise the existing VM state and timer survive. If `main` fails before its first successful `emit`, its current Source record receives `ERROR` and earlier pending records receive `RETRY`. A failing timer retries inputs still pending in the VM. Inputs already transferred to an accepted output boundary keep that boundary's outcome, even if execution later fails. Accepted output boundaries still run in order and completed boundaries do not roll back. The Source implementation owns any external replay decision.
+For at-least-once delivery, a Source decode failure completes the current record with `ERROR`. If earlier records are pending, they receive `RETRY` and the VM is rebuilt; otherwise the existing VM state and timer survive. An uncaught error in `main`, or a batch that cannot fit its destination Queue, discards the call's outputs and rebuilds the VM. The current Source record receives `ERROR` and earlier pending records receive `RETRY`. A failed timer call gives all pending inputs `RETRY`. Batches already sent by earlier calls keep their own results. The Source implementation decides whether and how to replay inputs.
 
 CPU/memory exhaustion, writes to read-only inputs or built-ins, replacing frozen `main` and other sandbox violations cannot be caught by nested `pcall`/`xpcall`. They terminate the current execution. An unexpected Source process failure resets its Flow's Lua state, timers and pending inputs. A planned configuration update can preserve compatible Lua state; see [Document updates](tenon-document.md#updates-and-failure). Outputs already sent downstream are not withdrawn.

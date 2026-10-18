@@ -27,7 +27,6 @@ use std::error::Error;
 use std::fmt;
 
 use super::egress::EgressError;
-use crate::identifiers::SinkContractId;
 use crate::lua::LuaVmErrorKind;
 use crate::pipeline::ingress_queue::IngressQueueError;
 use tenon_ipc::bell::BellError;
@@ -47,11 +46,9 @@ pub(crate) enum FlowChannelError {
         /// Stable Lua category; interpreter details remain on the owner thread.
         kind: LuaVmErrorKind,
     },
-    /// A Flow-local Sink Contract route rejected an accepted payload.
-    EgressRoute {
-        /// Exact Sink Contract whose route failed.
-        sink_contract_id: SinkContractId,
-        /// Original route failure.
+    /// Sending a Lua output batch failed.
+    EgressBatch {
+        /// Original Queue failure.
         source: EgressError,
     },
     /// An accepted payload did not reach its all-target release boundary.
@@ -88,14 +85,7 @@ impl fmt::Display for FlowChannelError {
             Self::LuaVmLoad { kind } => {
                 write!(formatter, "Flow Channel Lua VM load failed: {kind:?}")
             }
-            Self::EgressRoute {
-                sink_contract_id, ..
-            } => {
-                write!(
-                    formatter,
-                    "Flow Channel route for {sink_contract_id} failed"
-                )
-            }
+            Self::EgressBatch { .. } => formatter.write_str("Flow Channel output batch failed"),
             Self::EgressRelease { .. } => formatter.write_str("Flow Channel Egress release failed"),
             Self::ChannelWait { .. } => formatter.write_str("Flow Channel wait failed"),
             Self::Bell { .. } => formatter.write_str("Flow Channel doorbell failed"),
@@ -116,7 +106,7 @@ impl Error for FlowChannelError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::IngressQueue { source } => Some(source),
-            Self::EgressRoute { source, .. } => Some(source),
+            Self::EgressBatch { source } => Some(source),
             Self::EgressRelease { source } => Some(source),
             Self::ChannelWait { source } => Some(source),
             Self::Bell { source } => Some(source),

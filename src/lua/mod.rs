@@ -447,12 +447,12 @@ struct SandboxGuards {
 #[derive(Debug)]
 pub(crate) struct LuaMainOutcome {
     result: Result<(), LuaVmError>,
-    emit_boundaries: Vec<emit::EmitBoundary>,
+    emit_batch: emit::EmitBatch,
 }
 
 impl LuaMainOutcome {
-    pub(crate) fn into_parts(self) -> (Result<(), LuaVmError>, Vec<emit::EmitBoundary>) {
-        (self.result, self.emit_boundaries)
+    pub(crate) fn into_parts(self) -> (Result<(), LuaVmError>, emit::EmitBatch) {
+        (self.result, self.emit_batch)
     }
 }
 
@@ -712,7 +712,7 @@ impl LuaVm {
     fn terminal_outcome(&self) -> Option<LuaMainOutcome> {
         self.terminal_error_kind().map(|kind| LuaMainOutcome {
             result: Err(LuaVmError::without_source(kind)),
-            emit_boundaries: Vec::new(),
+            emit_batch: emit::EmitBatch::default(),
         })
     }
 
@@ -730,7 +730,7 @@ impl LuaVm {
             Err(error) => {
                 return LuaMainOutcome {
                     result: Err(self.map_error(error, LuaVmErrorKind::MainFailed)),
-                    emit_boundaries: Vec::new(),
+                    emit_batch: emit::EmitBatch::default(),
                 };
             }
         };
@@ -739,14 +739,14 @@ impl LuaVm {
             Err(error) => {
                 return LuaMainOutcome {
                     result: Err(self.map_error(error, LuaVmErrorKind::MainFailed)),
-                    emit_boundaries: Vec::new(),
+                    emit_batch: emit::EmitBatch::default(),
                 };
             }
         };
         if self.emit_slot.begin_main(targets).is_err() {
             return LuaMainOutcome {
                 result: Err(self.internal_invariant_error()),
-                emit_boundaries: Vec::new(),
+                emit_batch: emit::EmitBatch::default(),
             };
         }
         let mut elapsed = None;
@@ -766,13 +766,13 @@ impl LuaVm {
             Err(_) => {
                 return LuaMainOutcome {
                     result: Err(self.internal_invariant_error()),
-                    emit_boundaries: Vec::new(),
+                    emit_batch: emit::EmitBatch::default(),
                 };
             }
         };
         LuaMainOutcome {
             result,
-            emit_boundaries,
+            emit_batch: emit_boundaries,
         }
     }
 
@@ -856,7 +856,6 @@ impl Sandbox {
         install_readonly_callbacks(lua, Rc::clone(&guards.fatal_fault))?;
         let environment_values = lua.create_table()?;
         let environment = lua.create_table()?;
-        let emit_slot = emit::EmitSlot::default();
         let timer_slot = timer::TimerSlot::new(timer_origin, event_order);
 
         install_environment_metatable(
@@ -958,6 +957,7 @@ impl Sandbox {
 
         environment_values.raw_set("_G", environment.clone())?;
         protect_name(&guards.protected_names, "_G");
+        let emit_slot = emit::EmitSlot::new(Rc::clone(&native_memory_budget));
         emit::install(
             lua,
             &environment_values,

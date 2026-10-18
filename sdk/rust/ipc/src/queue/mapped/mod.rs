@@ -368,6 +368,61 @@ impl QueueWriter {
         ))
     }
 
+    /// Computes space for all records, including frame headers and wrap gaps.
+    ///
+    /// `None` means the batch cannot fit at the current write position, even
+    /// after all older records are released. This method does not write bytes.
+    ///
+    /// # Errors
+    /// Returns an error for invalid record lengths or Queue positions.
+    pub fn batch_space(
+        &self,
+        record_lengths: impl IntoIterator<Item = usize>,
+    ) -> Result<Option<u64>, QueueRuntimeError> {
+        let start = self.committed_position()?;
+        let mut end = start;
+        for length in record_lengths {
+            match plan_append(
+                self.data_capacity(),
+                self.max_payload_size(),
+                end,
+                start,
+                length,
+            )? {
+                super::AppendDecision::Ready(plan) => end = plan.next_commit(),
+                super::AppendDecision::Full => return Ok(None),
+            }
+        }
+        Ok(Some(end.get() - start.get()))
+    }
+
+    /// Waits for enough free bytes for a previously planned batch.
+    ///
+    /// The caller must not write between planning the batch and this wait.
+    ///
+    /// # Errors
+    /// Returns an error for corrupt positions, an invalid size, or a wait failure.
+    pub fn wait_batch_writable_observed(
+        &mut self,
+        required: u64,
+        mut blocked: impl FnMut(),
+    ) -> Result<WaitOutcome, QueueRuntimeError> {
+        let memory = &self.core.memory;
+        if required > memory.capacity().get() {
+            return Err(FormatError::RecordTooLarge.into());
+        }
+        wait_indefinitely(memory, || {
+            let commit = memory.load_commit()?;
+            let release = memory.load_release()?;
+            validate_positions(memory.capacity(), commit, release)?;
+            let ready = memory.capacity().get() - (commit.get() - release.get()) >= required;
+            if !ready {
+                blocked();
+            }
+            Ok(ready)
+        })
+    }
+
     /// Returns a thread-safe handle for waking the loop that waits on this writer.
     ///
     /// Every returned handle rings the loop doorbell this writer bound to. A
@@ -1450,6 +1505,43 @@ mod tests {
             NonZeroU32::new(slots).ok_or_else(|| io::Error::other("slots must be positive"))?;
         create_bell_region(&region_path, slot_count, 1).map_err(io::Error::other)?;
         BellRegion::open(&region_path).map_err(io::Error::other)
+    }
+
+    #[test]
+    fn batch_space_includes_wrap_gaps_even_when_queue_is_empty() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (mut writer, mut reader, _) = endpoint_pair(directory.path(), "batch", 48, 24)?;
+        assert_eq!(
+            writer.batch_space([16, 16]).map_err(io::Error::other)?,
+            Some(48)
+        );
+        // A 24-byte body plus its header advances the empty Queue to offset 32.
+        writer
+            .try_write_with(
+                24,
+                |destination| std::io::Write::write_all(destination, &[0; 24]),
+                || {},
+            )
+            .map_err(io::Error::other)?;
+        assert!(matches!(
+            reader.try_read().map_err(io::Error::other)?,
+            ReadOutcome::Record(_)
+        ));
+        reader.release(1).map_err(io::Error::other)?;
+        assert_eq!(
+            writer.batch_space([16]).map_err(io::Error::other)?,
+            Some(40)
+        );
+        assert_eq!(
+            writer.batch_space([16, 16]).map_err(io::Error::other)?,
+            None
+        );
+        assert_eq!(
+            writer.committed_position().map_err(io::Error::other)?.get(),
+            32
+        );
+        assert_eq!(writer.observer().sample(), Some((0, 48)));
+        Ok(())
     }
 
     #[test]
