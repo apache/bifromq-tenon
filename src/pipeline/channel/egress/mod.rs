@@ -25,7 +25,7 @@
 //! Queues and readers can only release more space. An OS failure after the first
 //! commit is terminal; the enclosing Pipeline owns recovery, never rollback.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, btree_map::Entry};
 use std::error::Error;
 use std::fmt;
 use std::io::Write;
@@ -38,7 +38,9 @@ use crate::identifiers::{PluginInstanceId, SinkContractId};
 use crate::lua::{EmitBoundary, EmitTargets};
 use tenon_ipc::bell::{BellRegion, LoopBell, WaitOutcome};
 use tenon_ipc::queue::QueueObserver;
-use tenon_ipc::queue::{QueueRuntimeError, QueueWriter, WriteOutcome, WriteReceipt};
+use tenon_ipc::queue::{
+    AppendDecision, QueueRuntimeError, QueueWriter, WriteOutcome, WriteReceipt, plan_append,
+};
 
 pub(crate) type EgressRoutes = HashMap<SinkContractId, EgressRoute>;
 pub(crate) type PreparedEgressRoutes =
@@ -87,72 +89,67 @@ pub(super) enum BatchSendOutcome {
 }
 
 /// Checks every Queue before writing any output. Repeated emits stay separate.
+/// All writers must be bound to the Bell slot that `bell` waits on.
 #[allow(clippy::expect_used, reason = "Lua validates every output target")]
 pub(super) fn send_batch(
     routes: &mut EgressRoutes,
     boundaries: &[EmitBoundary],
+    bell: &LoopBell,
     metrics: &ChannelMetrics,
     stopped: impl Fn() -> bool,
 ) -> Result<BatchSendOutcome, EgressError> {
-    let mut targets: BTreeMap<PluginInstanceId, SinkContractId> = BTreeMap::new();
+    let mut plans = BTreeMap::new();
     for boundary in boundaries {
         if let EmitBoundary::Payload {
             sink_contract_id,
             instance_id,
-            ..
+            record,
         } = boundary
         {
             let route = routes.get(sink_contract_id).expect("validated contract");
-            for instance in route
-                .targets
-                .keys()
-                .filter(|id| instance_id.as_ref().is_none_or(|selected| selected == *id))
-            {
-                targets
-                    .entry(instance.clone())
-                    .or_insert_with(|| sink_contract_id.clone());
+            let selected = match instance_id {
+                Some(id) => route.targets.range::<PluginInstanceId, _>(id..=id),
+                None => route.targets.range::<PluginInstanceId, _>(..),
+            };
+            for (instance, target) in selected {
+                let (_, start, end) = match plans.entry(instance) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        let start = target.writer.committed_position()?;
+                        entry.insert((target, start, start))
+                    }
+                };
+                // Keep the initial commit fixed while planning this Queue's frames.
+                match plan_append(
+                    target.writer.data_capacity(),
+                    target.writer.max_payload_size(),
+                    *end,
+                    *start,
+                    record.len(),
+                )
+                .map_err(QueueRuntimeError::from)?
+                {
+                    AppendDecision::Ready(plan) => *end = plan.next_commit(),
+                    AppendDecision::Full => return Ok(BatchSendOutcome::TooLarge),
+                }
             }
         }
     }
-    let mut spaces = Vec::with_capacity(targets.len());
     // Reject impossible batches before waiting on any Queue.
-    for (instance, contract) in targets {
-        let target = &routes[&contract].targets[&instance];
-        // Read lengths directly from the output buffer instead of copying one
-        // length per output per target for broadcasts.
-        let lengths = boundaries.iter().filter_map(|boundary| match boundary {
-            EmitBoundary::Payload {
-                sink_contract_id,
-                instance_id,
-                record,
-            } if sink_contract_id == &contract
-                && instance_id.as_ref().is_none_or(|id| id == &instance) =>
-            {
-                Some(record.len())
-            }
-            _ => None,
-        });
-        let Some(space) = target.writer.batch_space(lengths)? else {
-            return Ok(BatchSendOutcome::TooLarge);
-        };
-        spaces.push((contract, instance, space));
-    }
-    for (contract, instance, space) in spaces {
-        let target = routes
-            .get_mut(&contract)
-            .expect("validated contract")
-            .targets
-            .get_mut(&instance)
-            .expect("validated target");
+    for (_, (target, start, end)) in plans {
+        let space = end.get() - start.get();
         let mut wait = metrics.wait(WaitKind::EgressCapacity(&target.metrics));
         loop {
             if stopped() {
                 return Ok(BatchSendOutcome::Interrupted);
             }
-            if target
-                .writer
-                .wait_batch_writable_observed(space, || wait.blocked())?
-                == WaitOutcome::Ready
+            if bell.wait_until(|| -> Result<bool, QueueRuntimeError> {
+                let ready = target.writer.free_bytes()? >= space;
+                if !ready {
+                    wait.blocked();
+                }
+                Ok(ready)
+            })? == WaitOutcome::Ready
             {
                 wait.ready();
                 break;
@@ -162,7 +159,7 @@ pub(super) fn send_batch(
     if stopped() {
         return Ok(BatchSendOutcome::Interrupted);
     }
-    let mut receipts = BTreeMap::new();
+    let mut receipts: BTreeMap<PluginInstanceId, (SinkContractId, WriteReceipt)> = BTreeMap::new();
     for boundary in boundaries {
         if let EmitBoundary::Payload {
             sink_contract_id,
@@ -173,15 +170,16 @@ pub(super) fn send_batch(
             let route = routes
                 .get_mut(sink_contract_id)
                 .expect("validated contract");
-            for (instance, target) in &mut route.targets {
-                if instance_id
-                    .as_ref()
-                    .is_none_or(|selected| selected == instance)
-                {
-                    receipts.insert(
-                        instance.clone(),
-                        (sink_contract_id.clone(), target.commit(record, metrics)?),
-                    );
+            let selected = match instance_id {
+                Some(id) => route.targets.range_mut::<PluginInstanceId, _>(id..=id),
+                None => route.targets.range_mut::<PluginInstanceId, _>(..),
+            };
+            for (instance, target) in selected {
+                let receipt = target.commit(record, metrics)?;
+                if let Some((_, last)) = receipts.get_mut(instance) {
+                    *last = receipt;
+                } else {
+                    receipts.insert(instance.clone(), (sink_contract_id.clone(), receipt));
                 }
             }
         }

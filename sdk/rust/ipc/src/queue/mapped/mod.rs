@@ -368,59 +368,20 @@ impl QueueWriter {
         ))
     }
 
-    /// Computes space for all records, including frame headers and wrap gaps.
+    /// Returns the free data bytes without changing Queue or Bell state.
     ///
-    /// `None` means the batch cannot fit at the current write position, even
-    /// after all older records are released. This method does not write bytes.
-    ///
-    /// # Errors
-    /// Returns an error for invalid record lengths or Queue positions.
-    pub fn batch_space(
-        &self,
-        record_lengths: impl IntoIterator<Item = usize>,
-    ) -> Result<Option<u64>, QueueRuntimeError> {
-        let start = self.committed_position()?;
-        let mut end = start;
-        for length in record_lengths {
-            match plan_append(
-                self.data_capacity(),
-                self.max_payload_size(),
-                end,
-                start,
-                length,
-            )? {
-                super::AppendDecision::Ready(plan) => end = plan.next_commit(),
-                super::AppendDecision::Full => return Ok(None),
-            }
-        }
-        Ok(Some(end.get() - start.get()))
-    }
-
-    /// Waits for enough free bytes for a previously planned batch.
-    ///
-    /// The caller must not write between planning the batch and this wait.
+    /// Frame headers, padding, and wrap gaps use this space. The reader can
+    /// release more space after this call. This method does not reserve space.
     ///
     /// # Errors
-    /// Returns an error for corrupt positions, an invalid size, or a wait failure.
-    pub fn wait_batch_writable_observed(
-        &mut self,
-        required: u64,
-        mut blocked: impl FnMut(),
-    ) -> Result<WaitOutcome, QueueRuntimeError> {
+    ///
+    /// Returns an error if the live Queue positions are invalid.
+    pub fn free_bytes(&self) -> Result<u64, QueueRuntimeError> {
         let memory = &self.core.memory;
-        if required > memory.capacity().get() {
-            return Err(FormatError::RecordTooLarge.into());
-        }
-        wait_indefinitely(memory, || {
-            let commit = memory.load_commit()?;
-            let release = memory.load_release()?;
-            validate_positions(memory.capacity(), commit, release)?;
-            let ready = memory.capacity().get() - (commit.get() - release.get()) >= required;
-            if !ready {
-                blocked();
-            }
-            Ok(ready)
-        })
+        let commit = memory.load_commit()?;
+        let release = memory.load_release()?;
+        validate_positions(memory.capacity(), commit, release)?;
+        Ok(memory.capacity().get() - (commit.get() - release.get()))
     }
 
     /// Returns a thread-safe handle for waking the loop that waits on this writer.
@@ -1508,39 +1469,55 @@ mod tests {
     }
 
     #[test]
-    fn batch_space_includes_wrap_gaps_even_when_queue_is_empty() -> io::Result<()> {
+    fn free_bytes_changes_only_after_commit_or_release() -> io::Result<()> {
         let directory = tempfile::tempdir()?;
-        let (mut writer, mut reader, _) = endpoint_pair(directory.path(), "batch", 48, 24)?;
+        let (mut writer, mut reader, _) = endpoint_pair(directory.path(), "queue", 48, 16)?;
+        assert_eq!(writer.free_bytes()?, 48);
+        for remaining in [24, 0] {
+            assert!(matches!(
+                writer.try_write_with(
+                    16,
+                    |destination| std::io::Write::write_all(destination, &[0; 16]),
+                    || {},
+                )?,
+                WriteOutcome::Committed(_)
+            ));
+            assert_eq!(writer.free_bytes()?, remaining);
+            assert!(matches!(reader.try_read()?, ReadOutcome::Record(_)));
+            assert_eq!(writer.free_bytes()?, remaining);
+        }
+        reader.release(1)?;
+        let queue_before = std::fs::read(directory.path().join("queue"))?;
+        let bell_before = std::fs::read(directory.path().join("loops.bells"))?;
+        assert_eq!(writer.free_bytes()?, 24);
+        assert_eq!(std::fs::read(directory.path().join("queue"))?, queue_before);
         assert_eq!(
-            writer.batch_space([16, 16]).map_err(io::Error::other)?,
-            Some(48)
+            std::fs::read(directory.path().join("loops.bells"))?,
+            bell_before
         );
-        // A 24-byte body plus its header advances the empty Queue to offset 32.
-        writer
-            .try_write_with(
-                24,
-                |destination| std::io::Write::write_all(destination, &[0; 24]),
-                || {},
-            )
-            .map_err(io::Error::other)?;
-        assert!(matches!(
-            reader.try_read().map_err(io::Error::other)?,
-            ReadOutcome::Record(_)
-        ));
-        reader.release(1).map_err(io::Error::other)?;
-        assert_eq!(
-            writer.batch_space([16]).map_err(io::Error::other)?,
-            Some(40)
-        );
-        assert_eq!(
-            writer.batch_space([16, 16]).map_err(io::Error::other)?,
-            None
-        );
-        assert_eq!(
-            writer.committed_position().map_err(io::Error::other)?.get(),
-            32
-        );
-        assert_eq!(writer.observer().sample(), Some((0, 48)));
+        reader.release(1)?;
+        assert_eq!(writer.free_bytes()?, 48);
+        Ok(())
+    }
+
+    #[test]
+    fn free_bytes_rejects_corrupt_live_positions() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (writer, _reader, _) = endpoint_pair(directory.path(), "queue", 48, 16)?;
+        for (commit, release, expected) in [
+            (1, 0, FormatError::UnalignedPosition),
+            (16, 1, FormatError::UnalignedPosition),
+            (16, 24, FormatError::ReleaseAheadOfCommit),
+            (64, 0, FormatError::OccupancyExceedsCapacity),
+        ] {
+            let mapping = &writer.core.memory.mapping;
+            store_atomic_u64(mapping, COMMIT_OFFSET, commit, POSITION_STORE_ORDERING);
+            store_atomic_u64(mapping, RELEASE_OFFSET, release, POSITION_STORE_ORDERING);
+            assert!(matches!(
+                writer.free_bytes(),
+                Err(QueueRuntimeError::Format(error)) if error == expected
+            ));
+        }
         Ok(())
     }
 

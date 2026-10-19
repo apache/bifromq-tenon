@@ -761,9 +761,13 @@ impl FlowChannel {
             let has_payload = emit_batch
                 .iter()
                 .any(|boundary| matches!(boundary, EmitBoundary::Payload { .. }));
-            let sent = send_batch(&mut self.routes, &emit_batch, &self.metrics, || {
-                self.control.is_stopping()
-            })
+            let sent = send_batch(
+                &mut self.routes,
+                &emit_batch,
+                &self.bell,
+                &self.metrics,
+                || self.control.is_stopping(),
+            )
             .map_err(|source| FlowChannelError::EgressBatch { source })?;
             match sent {
                 BatchSendOutcome::Interrupted => return Ok(FlowChannelStep::Stopped),
@@ -781,7 +785,7 @@ impl FlowChannel {
                     } else {
                         Vec::new()
                     };
-                    if has_payload || !self.pending_ack.is_empty() {
+                    if has_payload || (!records.is_empty() && !self.pending_ack.is_empty()) {
                         pending.set_record_ids(records);
                         self.pending_ack.push(pending);
                     } else if self.complete_all(records, IngressCompletionStatus::Ok)?

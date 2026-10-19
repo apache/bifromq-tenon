@@ -724,6 +724,61 @@ fn empty_emit_cannot_complete_a_later_input_before_an_older_batch() -> io::Resul
 }
 
 #[test]
+fn empty_timer_batches_keep_only_source_completion_work() -> io::Result<()> {
+    let mut fixture = RoutingFixture::new()?;
+    let (mut channel, _) = fixture.open(
+        r#"
+        local builder = registry:getBuilder("com.example.kafka@1.0.0")
+        function main(event)
+            if event.type == "timer" then
+                emit()
+                setTimeout(0)
+            elseif event.payload.deviceId == "output" then
+                emit(builder:build(), "A")
+            else setTimeout(0) end
+        end
+    "#,
+        test_channel_publisher(0),
+    )?;
+    for (id, label) in [(1, "output"), (2, "hold")] {
+        fixture.source.submit(id, source_payload(label)?)?;
+        assert_eq!(
+            process_one_source(&mut channel)?,
+            FlowChannelStep::EventProcessed
+        );
+    }
+    assert!(fixture.a.try_read_record()?.is_some());
+    for _ in 0..128 {
+        assert!(matches!(
+            channel.pending_work().map_err(channel_error)?,
+            Some(super::super::ChannelWork::TimerDue)
+        ));
+        assert_eq!(
+            channel.process_timer().map_err(channel_error)?,
+            FlowChannelStep::EventProcessed
+        );
+    }
+    assert!(channel.pending_records.is_empty());
+    assert!(fixture.source.try_completion()?.is_none());
+    assert_eq!(channel.pending_ack.len(), 2);
+    fixture.a.release(1)?;
+    channel.drain_released().map_err(channel_error)?;
+    for id in [1, 2] {
+        assert_eq!(
+            fixture.source.wait_completion()?,
+            completion(id, IngressCompletionStatus::Ok)
+        );
+    }
+    assert!(channel.pending_ack.is_empty());
+    assert_eq!(
+        channel.process_timer().map_err(channel_error)?,
+        FlowChannelStep::EventProcessed
+    );
+    assert!(channel.pending_ack.is_empty());
+    Ok(())
+}
+
+#[test]
 fn a_failed_target_retries_the_whole_batch_after_another_target_succeeds() -> io::Result<()> {
     let mut fixture = RoutingFixture::new()?;
     let (mut channel, _) = fixture.open(

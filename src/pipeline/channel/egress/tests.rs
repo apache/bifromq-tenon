@@ -30,14 +30,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use tenon_ipc::bell::create_bell_region;
-use tenon_ipc::queue::contract_test_support::{open_reader, open_writer};
+use tenon_ipc::queue::contract_test_support::open_reader;
 use tenon_ipc::queue::{DataCapacity, QueueReader, QueueWaiter, ReadOutcome, create_queue_file};
 
 #[test]
 fn selected_target_does_not_wait_for_a_full_unselected_queue() -> io::Result<()> {
     let directory = tempfile::tempdir()?;
-    let (first, mut first_reader) = queue(&directory.path().join("first"), 16)?;
-    let (mut second, mut second_reader) = queue(&directory.path().join("second"), 16)?;
+    let bell = writer_bell(directory.path())?;
+    let (first, mut first_reader) = queue(&directory.path().join("first"), 16, &bell)?;
+    let (mut second, mut second_reader) = queue(&directory.path().join("second"), 16, &bell)?;
     assert!(matches!(
         second
             .try_write_with(
@@ -61,9 +62,13 @@ fn selected_target_does_not_wait_for_a_full_unselected_queue() -> io::Result<()>
     let outputs = [output(encoded_record(&[1])?, Some(selected))?];
     let (done, result) = std::sync::mpsc::sync_channel(1);
     let writer = thread::spawn(move || {
-        let outcome = send_batch(&mut routes, &outputs, &ChannelMetrics::default(), || {
-            worker_control.is_stopping()
-        });
+        let outcome = send_batch(
+            &mut routes,
+            &outputs,
+            &bell,
+            &ChannelMetrics::default(),
+            || worker_control.is_stopping(),
+        );
         let _ = done.send(outcome);
     });
     let outcome = result.recv_timeout(std::time::Duration::from_secs(5));
@@ -98,9 +103,10 @@ fn selected_target_does_not_wait_for_a_full_unselected_queue() -> io::Result<()>
 #[test]
 fn a_full_last_target_prevents_any_partial_fanout_until_real_release() -> io::Result<()> {
     let directory = tempfile::tempdir()?;
-    let (first, mut first_reader) = queue(&directory.path().join("first"), 16)?;
+    let bell = writer_bell(directory.path())?;
+    let (first, mut first_reader) = queue(&directory.path().join("first"), 16, &bell)?;
     let second_path = directory.path().join("second");
-    let (mut second, mut second_reader) = queue(&second_path, 16)?;
+    let (mut second, mut second_reader) = queue(&second_path, 16, &bell)?;
     assert!(matches!(
         second
             .try_write_with(
@@ -118,7 +124,13 @@ fn a_full_last_target_prevents_any_partial_fanout_until_real_release() -> io::Re
     let mut routes = routes(first, second)?;
     let outputs = [output(encoded_record(&[1])?, None)?];
     let writer = thread::spawn(move || {
-        send_batch(&mut routes, &outputs, &ChannelMetrics::default(), || false)
+        send_batch(
+            &mut routes,
+            &outputs,
+            &bell,
+            &ChannelMetrics::default(),
+            || false,
+        )
     });
 
     let armed = wait_for_armed_loop(
@@ -158,9 +170,10 @@ fn a_full_last_target_prevents_any_partial_fanout_until_real_release() -> io::Re
 #[test]
 fn stop_interrupts_a_full_target_without_committing_to_any_target() -> io::Result<()> {
     let directory = tempfile::tempdir()?;
-    let (first, mut first_reader) = queue(&directory.path().join("first"), 16)?;
+    let bell = writer_bell(directory.path())?;
+    let (first, mut first_reader) = queue(&directory.path().join("first"), 16, &bell)?;
     let second_path = directory.path().join("second");
-    let (mut second, mut second_reader) = queue(&second_path, 16)?;
+    let (mut second, mut second_reader) = queue(&second_path, 16, &bell)?;
     assert!(matches!(
         second
             .try_write_with(
@@ -181,9 +194,13 @@ fn stop_interrupts_a_full_target_without_committing_to_any_target() -> io::Resul
     let mut routes = routes(first, second)?;
     let outputs = [output(encoded_record(&[1])?, None)?];
     let writer = thread::spawn(move || {
-        send_batch(&mut routes, &outputs, &ChannelMetrics::default(), || {
-            worker_control.is_stopping()
-        })
+        send_batch(
+            &mut routes,
+            &outputs,
+            &bell,
+            &ChannelMetrics::default(),
+            || worker_control.is_stopping(),
+        )
     });
 
     let armed = wait_for_armed_loop(
@@ -220,25 +237,36 @@ fn encoded_record(payload: &[u8]) -> io::Result<EncodedEgressRecord> {
     .map_err(io::Error::other)
 }
 
-fn queue(path: &Path, bytes: u64) -> io::Result<(QueueWriter, QueueReader)> {
+fn writer_bell(directory: &Path) -> io::Result<Arc<LoopBell>> {
+    let path = directory.join("writer.bells");
+    create_bell_region(&path, NonZeroU32::MIN, 0).map_err(io::Error::other)?;
+    BellRegion::open(&path)
+        .and_then(|region| region.loop_bell(0))
+        .map_err(io::Error::other)
+}
+
+fn queue(path: &Path, bytes: u64, bell: &Arc<LoopBell>) -> io::Result<(QueueWriter, QueueReader)> {
     let capacity = DataCapacity::try_from(bytes).map_err(io::Error::other)?;
     let maximum = NonZeroU64::new(capacity.get() - tenon_ipc::queue::FRAME_HEADER_LEN as u64)
         .ok_or_else(|| io::Error::other("Fixture capacity must hold a payload"))?;
     create_queue_file(path, capacity, maximum).map_err(io::Error::other)?;
     let writer_region = writer_bell_path(path);
     let reader_region = reader_bell_path(path);
-    for region in [&writer_region, &reader_region] {
-        create_bell_region(region, NonZeroU32::MIN, 0).map_err(io::Error::other)?;
-    }
+    create_bell_region(&reader_region, NonZeroU32::MIN, 0).map_err(io::Error::other)?;
     Ok((
-        open_writer(path, &writer_region, 0, &reader_region).map_err(io::Error::other)?,
+        QueueWriter::open(
+            path,
+            Arc::clone(bell),
+            BellRegion::open(&reader_region).map_err(io::Error::other)?,
+        )
+        .map_err(io::Error::other)?,
         open_reader(path, &reader_region, 0, &writer_region).map_err(io::Error::other)?,
     ))
 }
 
-/// Returns the Bell Region holding the writing loop's own doorbell of one fixture Queue.
+/// Returns the shared writer Bell Region for this fixture.
 fn writer_bell_path(queue: &Path) -> PathBuf {
-    queue.with_extension("writer.bells")
+    queue.with_file_name("writer.bells")
 }
 
 /// Returns the Bell Region holding the reading loop's own doorbell of one fixture Queue.
@@ -299,11 +327,12 @@ fn direct_fanout_benchmark() -> io::Result<()> {
         .without_plots();
     for target_count in [1, 4, 16] {
         let directory = tempfile::tempdir()?;
+        let bell = writer_bell(directory.path())?;
         let mut targets = BTreeMap::new();
         let mut readers = Vec::new();
         for index in 0..target_count {
             let id = format!("target-{index}");
-            let (writer, reader) = queue(&directory.path().join(&id), 64 * 1024)?;
+            let (writer, reader) = queue(&directory.path().join(&id), 64 * 1024, &bell)?;
             targets.insert(
                 PluginInstanceId::try_from(id).map_err(io::Error::other)?,
                 writer,
@@ -338,7 +367,7 @@ fn direct_fanout_benchmark() -> io::Result<()> {
                             record: encoded_record(black_box(&payload))?,
                         }];
                         let BatchSendOutcome::Committed(pending) =
-                            send_batch(&mut routes, &outputs, &metrics, || false)
+                            send_batch(&mut routes, &outputs, &bell, &metrics, || false)
                                 .map_err(io::Error::other)?
                         else {
                             return Err(io::Error::other("Benchmark batch did not commit"));
@@ -374,39 +403,70 @@ fn direct_fanout_benchmark() -> io::Result<()> {
 }
 
 #[test]
-fn batch_waits_for_all_records_in_a_queue_before_sending_anywhere() -> io::Result<()> {
+fn batch_waits_across_contracts_without_draining_a_queue() -> io::Result<()> {
     let directory = tempfile::tempdir()?;
-    let (first, mut first_reader) = queue(&directory.path().join("first"), 32)?;
+    let bell = writer_bell(directory.path())?;
+    let (first, mut first_reader) = queue(&directory.path().join("first"), 32, &bell)?;
     let second_path = directory.path().join("second");
-    let (mut second, mut second_reader) = queue(&second_path, 32)?;
-    assert!(matches!(
-        second
-            .try_write_with(
+    let (mut second, mut second_reader) = queue(&second_path, 48, &bell)?;
+    for _ in 0..2 {
+        assert!(matches!(
+            second.try_write_with(
                 8,
                 |destination| Write::write_all(destination, &[9; 8]),
                 || {}
-            )
-            .map_err(io::Error::other)?,
-        WriteOutcome::Committed(_)
-    ));
-    assert!(matches!(
-        second_reader.try_read().map_err(io::Error::other)?,
-        ReadOutcome::Record(_)
-    ));
-    let contract = SinkContractId::try_from("com.example.test@1.0.0").map_err(io::Error::other)?;
+            )?,
+            WriteOutcome::Committed(_)
+        ));
+        assert!(matches!(second_reader.try_read()?, ReadOutcome::Record(_)));
+    }
+    let first_contract =
+        SinkContractId::try_from("com.example.first@1.0.0").map_err(io::Error::other)?;
+    let second_contract =
+        SinkContractId::try_from("com.example.second@2.0.0").map_err(io::Error::other)?;
     let outputs = ["first", "second", "second"]
         .into_iter()
         .map(|name| {
             Ok(EmitBoundary::Payload {
-                sink_contract_id: contract.clone(),
+                sink_contract_id: if name == "first" {
+                    first_contract.clone()
+                } else {
+                    second_contract.clone()
+                },
                 instance_id: Some(PluginInstanceId::try_from(name).map_err(io::Error::other)?),
                 record: encoded_record(&[1])?,
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
-    let mut routes = HashMap::from([(contract, route(first, second)?)]);
+    let mut routes = EgressRoutes::new();
+    for (contract, name, writer) in [
+        (first_contract, "first", first),
+        (second_contract, "second", second),
+    ] {
+        routes.insert(
+            contract,
+            EgressRoute::new(
+                BTreeMap::from([(
+                    PluginInstanceId::try_from(name).map_err(io::Error::other)?,
+                    writer,
+                )]),
+                &ChannelMetrics::default(),
+            ),
+        );
+    }
+    let wake = bell.interrupter();
+    let control = Arc::new(FlowChannelControl::new());
+    let worker_control = Arc::clone(&control);
+    let (done, result) = std::sync::mpsc::sync_channel(1);
     let worker = thread::spawn(move || {
-        send_batch(&mut routes, &outputs, &ChannelMetrics::default(), || false)
+        let outcome = send_batch(
+            &mut routes,
+            &outputs,
+            &bell,
+            &ChannelMetrics::default(),
+            || worker_control.is_stopping(),
+        );
+        let _ = done.send(outcome);
     });
     let armed = wait_for_armed_loop(
         &second_path,
@@ -421,10 +481,16 @@ fn batch_waits_for_all_records_in_a_queue_before_sending_anywhere() -> io::Resul
         second_reader.try_read().map_err(io::Error::other)?,
         ReadOutcome::Empty
     );
+    // One older record remains. The batch must proceed without draining it.
     second_reader.release(1).map_err(io::Error::other)?;
-    let outcome = worker
+    let outcome = result.recv_timeout(std::time::Duration::from_secs(5));
+    control.request_stop();
+    wake.interrupt().map_err(io::Error::other)?;
+    worker
         .join()
-        .map_err(|_| io::Error::other("batch writer panicked"))?
+        .map_err(|_| io::Error::other("batch writer panicked"))?;
+    let outcome = outcome
+        .map_err(io::Error::other)?
         .map_err(io::Error::other)?;
     armed?;
     assert!(first_empty && second_empty);
@@ -446,5 +512,50 @@ fn batch_waits_for_all_records_in_a_queue_before_sending_anywhere() -> io::Resul
         second_reader.try_read().map_err(io::Error::other)?,
         ReadOutcome::Empty
     ));
+    Ok(())
+}
+
+#[test]
+fn batch_includes_wrap_gaps_even_when_queue_is_empty() -> io::Result<()> {
+    for (start, count, fits) in [(0, 2, true), (32, 2, false), (32, 1, true)] {
+        let directory = tempfile::tempdir()?;
+        let bell = writer_bell(directory.path())?;
+        let (mut writer, mut reader) = queue(&directory.path().join("queue"), 48, &bell)?;
+        if start != 0 {
+            writer.try_write_with(
+                24,
+                |destination| Write::write_all(destination, &[0; 24]),
+                || {},
+            )?;
+            assert!(matches!(reader.try_read()?, ReadOutcome::Record(_)));
+            reader.release(1)?;
+        }
+        let metrics = ChannelMetrics::default();
+        let contract =
+            SinkContractId::try_from("com.example.test@1.0.0").map_err(io::Error::other)?;
+        let instance = PluginInstanceId::try_from("target").map_err(io::Error::other)?;
+        let mut routes = EgressRoutes::from([(
+            contract.clone(),
+            EgressRoute::new(BTreeMap::from([(instance.clone(), writer)]), &metrics),
+        )]);
+        let outputs = (0..count)
+            .map(|_| output(encoded_record(&[1; 8])?, Some(instance.clone())))
+            .collect::<io::Result<Vec<_>>>()?;
+        let outcome = send_batch(&mut routes, &outputs, &bell, &metrics, || false)
+            .map_err(io::Error::other)?;
+        assert_eq!(matches!(outcome, BatchSendOutcome::Committed(_)), fits);
+        if fits {
+            for _ in 0..count {
+                assert!(matches!(reader.try_read()?, ReadOutcome::Record(_)));
+            }
+            reader.release(count)?;
+        } else {
+            assert!(matches!(outcome, BatchSendOutcome::TooLarge));
+            let writer = &routes[&contract].targets[&instance].writer;
+            assert_eq!(writer.committed_position()?.get(), start);
+            assert_eq!(writer.free_bytes()?, 48);
+        }
+        assert!(matches!(reader.try_read()?, ReadOutcome::Empty));
+    }
     Ok(())
 }

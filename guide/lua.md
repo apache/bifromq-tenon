@@ -122,7 +122,9 @@ Output is allowed only during `main` or its helpers, not at top level. Each Sour
 
 Tenon buffers outputs until `main` returns normally. An uncaught error discards all of that call's outputs. An error caught by `pcall` does not fail the call. A record-size error is catchable and reports `egress.record_too_large`. Buffered records and their bookkeeping count against the VM memory limit.
 
-Before sending, Tenon checks space for the complete batch in each destination Queue. This includes frame headers, alignment, and wrap gaps. It waits for older records to release space. If the batch cannot fit even in an empty Queue at its current write position, it fails with `egress.batch_too_large` through the Lua failure path. This check happens after `main` returns, so `pcall` cannot catch it.
+Before sending, Tenon checks space for the complete batch in each destination Queue. This includes frame headers, alignment, and wrap gaps. It waits for older records to release space. Tenon sends nothing if an empty destination Queue cannot contain the batch at its current write position.
+
+Tenon sends a diagnostic with code `process.lua_main_failed` for this failure. The diagnostic text includes `egress.batch_too_large`. Tenon uses the Lua recovery rules for this failure. This check happens after `main` returns, so `pcall` cannot catch it.
 
 With at-least-once delivery, the batch owns all pending Source records. They receive `OK` only after every payload output finishes at every selected target. Later events can run while results are pending; batches complete in order. A call with only `emit()` completes without Sink output. Mixing `emit()` with payload emits still waits for all payload outputs. A call with no emits leaves inputs pending. See [delivery semantics](tenon-document.md#completion-and-delivery) and the [SDK contract](../sdk/plugin-sdk-contract.md).
 

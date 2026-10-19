@@ -103,6 +103,10 @@ Owned records remain valid after release or mapping closure. Rust `ReadPosition`
 
 A Rust `WriteReceipt` identifies the exclusive end of a committed append, including any wrap gap. It is bound to the same open writer that created it; using it with another writer or a reopened writer is rejected. `is_released` and `wait_released` read the existing shared `release`. A receipt is neither a business record identifier nor an acknowledgement, and it does not introduce another shared position.
 
+Rust `QueueWriter::free_bytes()` returns `dataCapacity - (commit - release)` after it validates the live positions. Invalid positions return a Queue error. The query does not reserve space or change Queue or Bell state. Frame headers, padding, and wrap gaps use this free space.
+
+The upper layer can calculate the space for several records with `plan_append`. It can then use its bound `LoopBell::wait_until` to wait for enough free bytes. The writer must not append between planning and that wait. Under the single-writer rule, available space cannot decrease until that writer appends.
+
 ## Bell Region v1 layout
 
 All integers are little-endian. The region has a 64-byte header, followed by one 64-byte slot per waiting loop.

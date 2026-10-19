@@ -171,7 +171,9 @@ The total unfinished sends in a channel, across encoding, submission, processing
 
 With `at-most-once`, Pipeline produces `OK` after copying the complete IngressRecord into owned memory. Later Lua or Sink failures do not change it.
 
-With `at-least-once`, input records stay pending until a successful Lua invocation emits. All outputs from that invocation form one batch, which owns the previously pending inputs and the current Source input, if any.
+With `at-least-once`, input records stay pending until a successful Lua invocation emits. Pipeline puts all outputs from that invocation into one Lua output batch. That batch owns the previously pending inputs and the current Source input, if any.
+
+Pipeline uses each Lua output batch for Queue capacity checks and Source completion. A Sink `write` call has a separate batch of records. The SDK puts records from one Queue into each `write` batch. A `write` call can contain part of one Lua output batch or records from several Lua calls.
 
 Each payload selects all matching Sinks or one instance through `emit(payload, instanceId)`. Repeated emits remain separate records. Pipeline checks the total space needed in each selected Queue, including frame headers, alignment, and wrap gaps. It waits for every Queue to have space before writing any output. A batch that cannot fit even after older records release fails with `egress.batch_too_large`.
 
@@ -179,7 +181,9 @@ Pipeline produces `OK` only after every Queue releases the batch's last record i
 
 A call with only `emit()` completes without Sink output. It still waits for older output batches and Completion Queue space. Mixing `emit()` with payload emits does not complete inputs early. A call with no emits leaves inputs pending. A timer invocation can emit a batch for all pending inputs.
 
-An uncaught Lua error discards all outputs from the invocation. An impossible batch also sends nothing and follows the same failure policy. A Source failure gives the current input `ERROR` and older pending inputs `RETRY`; a timer failure gives pending inputs `RETRY`. Lua and batch failures rebuild the VM. A Source decode failure uses the same completion statuses, but retains the VM if there are no older pending inputs. Errors caught by Lua `pcall` do not fail an invocation; the later batch capacity check cannot be caught by `pcall`. These failures never change an earlier `at-most-once` completion.
+Pipeline discards all outputs from an invocation with an uncaught Lua error. Pipeline also discards a batch that an empty destination Queue cannot contain. Pipeline replaces the VM after either failure. After either failure during a Source event, Pipeline sends `ERROR` for the current input and `RETRY` for older pending inputs. After either failure during a timer event, Pipeline sends `RETRY` for all pending inputs.
+
+A Source payload decode failure uses the same completion statuses. Pipeline keeps the VM if there are no older pending inputs; otherwise it replaces the VM. An invocation can continue after Lua `pcall` catches an ordinary error. The batch capacity check runs after the invocation, so `pcall` cannot catch it. These failures never change an earlier `at-most-once` completion. Pipeline uses the [session recovery rules](#33-healthy-session-handoff-and-failed-source-recovery) after a Source process failure.
 
 The Sink defines the downstream acknowledgement or durability represented by successful `write`. Tenon provides no cross-Sink transaction, exactly-once guarantee, or durable replay promise after Pipeline or machine failure. A crash between target commits, external effects, or release publication can produce duplicates on retry. Source business code owns upstream acknowledgement and retry policy.
 

@@ -96,7 +96,9 @@ Call `sender.send(channel, &payload)` with a zero-based channel index. An invali
 | `AckCode::Backpressure` | The channel has no available admission slot. No payload was encoded or submitted for this attempt. Slow or pause upstream production. |
 | `SendError` | The session failed or shut down before this request obtained a final result. External side effects may already have occurred. |
 
-For `at-most-once` delivery, success means the Pipeline has copied the input out of the Source queue; Lua processing and Sink writes may still be pending. For `at-least-once`, success means one Lua `emit` call has had its records successfully processed and released by all of that call's selected Sinks, or Lua explicitly acknowledged the input with an argument-free `emit()`. This does not aggregate every `emit` in a Lua invocation. The Sink implementation defines what successful processing means for its external system.
+For `at-most-once` delivery, success means the Pipeline has copied the complete input out of the Source Queue. Lua processing and Sink writes can still be pending.
+
+For `at-least-once`, Pipeline puts all outputs from one successful Lua `main` call into one batch. An input receives `OK` only after all selected Sinks process and release their outputs from that batch. A call with only `emit()` produces no Sink output, but it still waits for older batches and Completion Queue space. Mixing `emit()` with payload emits does not complete inputs early. Each Sink sets the success condition for its external system. See [Source acknowledgement](../../plugin-sdk-contract.md#32-what-a-source-acknowledgement-proves) for the completion rules.
 
 An admitted request keeps its slot until it fails before submission or the SDK processes its final result. Dropping `Completion` does not cancel the send or return the slot. The SDK never resends automatically. Upstream acknowledgements, retry delays, and duplicate handling belong to your plugin.
 

@@ -270,13 +270,16 @@ fn accept_emit(
     if encoded_len as u64 > max_record_bytes.get() {
         return Err(LuaApiFailure::Api("egress.record_too_large"));
     }
+    let contract = payload.sink_contract_id();
     let charge = encoded_len
-        .checked_add(payload.sink_contract_id().to_string().len())
+        .checked_add(contract.program_name().as_str().len())
+        .and_then(|bytes| bytes.checked_add(1))
+        .and_then(|bytes| bytes.checked_add(contract.exact_version().as_str().len()))
         .and_then(|bytes| bytes.checked_add(instance_id.as_ref().map_or(0, |id| id.as_str().len())))
         .ok_or(LuaApiFailure::MemoryExceeded)?;
     slot.accept(charge, || {
         Ok(EmitBoundary::Payload {
-            sink_contract_id: payload.sink_contract_id().clone(),
+            sink_contract_id: contract.clone(),
             instance_id,
             record: encode_deterministically(payload.message(), max_record_bytes)?,
         })
