@@ -77,7 +77,7 @@ Management write access grants control over executable workloads. The default Ru
 - [Metrics and live diagnostics](guide/observability.md)
 - [Runner extension interfaces](guide/runner-extensions.md)
 - [Developing a language SDK and scaffold](sdk/plugin-sdk-contract.md)
-- [IPC protocol for SDK developers](sdk/ipc_contract.md)
+- [IPC protocol for SDK developers](sdk/ipc-contract.md)
 - [Process sampling contract and language implementations](sdk/process-metrics-contract.md)
 - [Contributing and verification](CONTRIBUTING.md)
 
