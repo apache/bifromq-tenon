@@ -85,7 +85,7 @@ python3 tools/build-cache.py finish
 
 ## Plugin contributions
 
-Use the standard [Rust scaffold](sdk/rust/rust-plugin-scaffold/README.md) or [Java archetype](sdk/java/README.md#generate-a-plugin), and package plugins through `cargo tenon bundle` or the Java bundle goal. Validate them through normal Runner installation and lifecycle APIs. For a new language SDK or scaffold, follow the [SDK implementation contract](sdk/plugin-sdk-contract.md) and [IPC protocol](sdk/ipc-contract.md).
+Use the standard [Rust scaffold](sdk/rust/rust-plugin-scaffold/README.md) or [Java archetype](sdk/java/README.md#generate-a-plugin), and package plugins through `cargo tenon bundle` or the Java bundle goal. Validate them through normal Runner installation and lifecycle APIs. For a new language SDK or scaffold, follow the [SDK implementation contract](sdk/plugin-sdk-contract.md) and [IPC contract](sdk/ipc-contract.md).
 
 ## Licensing
 
