@@ -27,7 +27,7 @@ A **Program** is an installed plugin package; an **Instance** is one configured 
 
 An SDK provides the plugin author API for startup, Source submission, Sink delivery and shutdown. It handles transport, memory mappings, lifecycle control and process metrics. Plugin code supplies payloads, manages external clients, and decides when to acknowledge upstream or downstream operations. A combined Program exposes both capabilities through one business object.
 
-Use the [IPC contract](ipc_contract.md) for Queue and Bell behavior and the [process-metrics contract](process-metrics-contract.md) for CPU/RSS sampling. Language implementations provide reusable libraries; the Plugin SDK combines them with its language OpenTelemetry SDK and implements the startup, record, completion, lifecycle and metrics transport requirements below. Use the linked machine-readable definitions and test vectors to verify compatibility.
+Use the [IPC contract](ipc-contract.md) for Queue and Bell behavior and the [process-metrics contract](process-metrics-contract.md) for CPU/RSS sampling. Language implementations provide reusable libraries; the Plugin SDK combines them with its language OpenTelemetry SDK and implements the startup, record, completion, lifecycle and metrics transport requirements below. Use the linked machine-readable definitions and test vectors to verify compatibility.
 
 ## 1. Common consistency rules
 
