@@ -132,7 +132,7 @@ prost-reflect = "=0.16.5"
 prost-types = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
 rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process", "std", "thread"] }
-rustls = { version = "=0.23.44", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
 sha2 = { version = "=0.11.0", default-features = false }
